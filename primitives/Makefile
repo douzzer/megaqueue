@@ -7,15 +7,16 @@ SHELL=/bin/bash
 CC=gcc
 #LD=gcc-4.8
 LD=gcc
-COPTIONS=-std=gnu99
+COPTIONS=-std=gnu11
 OPT=-O9
-DBG=-Wall -Wextra -Wformat=2 -Winit-self -Wmissing-include-dirs -Wsuggest-attribute=pure -Wsuggest-attribute=const -Wsuggest-attribute=noreturn -Wunknown-pragmas -Wtraditional-conversion -Wshadow -Wpointer-arith -Wbad-function-cast -Wcast-align -Wwrite-strings -Wconversion -Wjump-misses-init -Wlogical-op -Wstrict-prototypes -Wold-style-definition -Wmissing-declarations -Wmissing-format-attribute -Wpointer-arith -Woverlength-strings -Wredundant-decls -Winline -Winvalid-pch
-DEFINES=-DMQ_RWLOCK_PRIORITYORDER_SUPPORT -DMQ_RWLOCK_INHERITPRIORITY_SUPPORT -DMQ_RWLOCK_ADAPTIVE_SUPPORT -DMQ_RWLOCK_NOCOSTLYERRORCHECKING_SUPPORT -DMQ_RWLOCK_ABORTWHENCORRUPTED_SUPPORT -DMQ_RWLOCK_ABORTONMISUSE_SUPPORT -DBENCHOPTIONS
+DBG=-g -Wall -Wextra -Wformat=2 -Winit-self -Wmissing-include-dirs -Wsuggest-attribute=pure -Wsuggest-attribute=const -Wsuggest-attribute=noreturn -Wunknown-pragmas -Wtraditional-conversion -Wshadow -Wpointer-arith -Wbad-function-cast -Wcast-align -Wwrite-strings -Wconversion -Wjump-misses-init -Wlogical-op -Wstrict-prototypes -Wold-style-definition -Wmissing-declarations -Wmissing-format-attribute -Wpointer-arith -Woverlength-strings -Wredundant-decls -Winline -Winvalid-pch
+#-DMQ_DEBUG -DMQ_RWLOCK_PRIORITYORDER_SUPPORT 
+DEFINES=-DMQ_RWLOCK_ADAPTIVE_SUPPORT -DMQ_RWLOCK_INHERITPRIORITY_SUPPORT -DMQ_RWLOCK_NOCOSTLYERRORCHECKING_SUPPORT -DMQ_RWLOCK_ABORTWHENCORRUPTED_SUPPORT -DMQ_RWLOCK_ABORTONMISUSE_SUPPORT -DBENCHOPTIONS
 INCLUDES=
 CFLAGS=$(COPTIONS) $(DEFINES) $(INCLUDES) $(OPT) $(DBG)
 
-MQLIB_SRCS=mq_time.c mq_error.c mq_procutil.c mq_threadutil.c mq_rwlock_internal.c
-MQLIB_OBJS=mq_time.o mq_error.o mq_procutil.o mq_threadutil.o mq_rwlock_internal.o
+MQLIB_SRCS=mq_time.c mq_error.c mq_procutil.c mq_threadutil.c mq_rwlock_internal.c mq_rwlock_global.c
+MQLIB_OBJS=mq_time.o mq_error.o mq_procutil.o mq_threadutil.o mq_rwlock_internal.o mq_rwlock_global.o
 MQLIB_TARGET=libmq.a
 
 LIBS=$(MQLIB_TARGET) -lrt -pthread

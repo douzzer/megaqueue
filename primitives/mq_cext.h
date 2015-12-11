@@ -12,7 +12,9 @@
 
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
 
-#define __unused __attribute__((unused))
+#define __unusedattr __attribute__((unused))
+#define __constfunc __attribute__((const))
+#define __purefunc __attribute__((pure))
 #define __noreturn __attribute__((noreturn))
 #define __deprecated __attribute__((deprecated))
 #define __inline_all_calls __attribute__((flatten))
@@ -23,6 +25,10 @@
 
 #define __fastpath(x) __builtin_expect((int64_t)(x),1L)
 #define __slowpath(x) __builtin_expect((int64_t)(x),0L)
+#undef __glibc_unlikely
+#define __glibc_unlikely(cond) __slowpath(cond)
+#undef __glibc_likely
+#define __glibc_likely(cond)   __fastpath(cond)
 
 /* borrow D's name for __builtin_choose_expr, albeit with functional syntax */
 #define __static_if(x,y,z) __builtin_choose_expr(x,y,z)
@@ -35,7 +41,9 @@
 #define auto __auto_type
 */
 
+#ifndef offsetof
 #define offsetof(type, member) __builtin_offsetof(type, member)
+#endif
 
 #define MQ_SyncInt_Get(i) __atomic_load_n(&(i),__ATOMIC_SEQ_CST)
 #define MQ_SyncInt_Put(i,val) __atomic_store_n(&(i),val,__ATOMIC_SEQ_CST)

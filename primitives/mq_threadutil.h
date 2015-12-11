@@ -19,6 +19,7 @@
 #define END_NOCANCELS if (oldstate != -1) \
   (void)pthread_setcancelstate(oldstate,0); \
 }
+
 #else
 #define START_NOCANCELS {
 #define END_NOCANCELS }

@@ -165,10 +165,16 @@ static void *testroutine_cond(void *arg) {
   pthread_cleanup_pop(1);
 
 #ifdef MQ_DEBUG_MORE
-  dprintf(STDERR_FILENO,"testroutine_cond done, retarg = %p\n",retarg);
+  MQ_dprintf3("testroutine_cond done, retarg = %p\n",retarg);
 #endif
 
   return retarg;
+}
+
+static void testroutine_cond_w_cleanup(MQ_RWLock_t *l) {
+  int ret;
+  if ((ret=MQ_W_Unlock(l))<0)
+    MQ_dprintf3("MQ_W_Unlock in testroutine_cond_w: %s\n",strerror((int)(-ret)));
 }
 
 static void *testroutine_cond_w(void *arg) {
@@ -179,16 +185,15 @@ static void *testroutine_cond_w(void *arg) {
   if ((ret=MQ_W_InheritLock((MQ_RWLock_t *)arg))<0)
     MQ_dprintf3("testroutine_cond_w MQ_W_InheritLock: %s\n",strerror((int)(-ret)));
 
+  pthread_cleanup_push(testroutine_cond_w_cleanup,arg);
+
   if ((ret=MQ_Cond_Wait(arg, MQ_FOREVER, &retarg, 0UL)) < 0)
     MQ_dprintf3("testroutine_cond_w MQ_Cond_Wait: %s\n",strerror((int)(-ret)));
 
-  if ((ret=MQ_W_Unlock(arg))<0) {
-    MQ_dprintf3("MQ_W_Unlock in testroutine_cond_w: %s\n",strerror((int)(-ret)));
-    return 0;
-  }
+  pthread_cleanup_pop(1);
 
 #ifdef MQ_DEBUG_MORE
-  dprintf(STDERR_FILENO,"testroutine_cond_w done, retarg = %p\n",retarg);
+  MQ_dprintf3("testroutine_cond_w done, retarg = %p\n",retarg);
 #endif
 
   return retarg;
@@ -234,7 +239,7 @@ static void *testroutine_cond_mutex(void *arg) {
   pthread_cleanup_pop(1);
 
 #ifdef MQ_DEBUG_MORE
-  dprintf(STDERR_FILENO,"testroutine_cond_mutex done, retarg = %p\n",retarg);
+  MQ_dprintf3("testroutine_cond_mutex done, retarg = %p\n",retarg);
 #endif
 
   return retarg;
@@ -252,7 +257,7 @@ static void *testroutine_cond_mutex_returnunlocked(void *arg) {
     MQ_dprintf3("testroutine_cond_mutex MQ_Cond_Wait: %s\n",strerror((int)(-ret)));
 
 #ifdef MQ_DEBUG_MORE
-  dprintf(STDERR_FILENO,"testroutine_cond_mutex done, retarg = %p\n",retarg);
+  MQ_dprintf3("testroutine_cond_mutex done, retarg = %p\n",retarg);
 #endif
 
   return retarg;
@@ -280,7 +285,7 @@ static void *testroutine_cond2(void *arg) {
   pthread_cleanup_pop(1);
 
 #ifdef MQ_DEBUG_MORE
-  dprintf(STDERR_FILENO,"testroutine_cond2 done, retarg = %p\n",retarg);
+  MQ_dprintf3("testroutine_cond2 done, retarg = %p\n",retarg);
 #endif
 
   return retarg;
@@ -304,14 +309,14 @@ static void *testroutine_cond3(void *arg) {
   pthread_cleanup_pop(1);
 
 #ifdef MQ_DEBUG_MORE
-  dprintf(STDERR_FILENO,"testroutine_cond3 done, retarg = %p\n",retarg);
+  MQ_dprintf3("testroutine_cond3 done, retarg = %p\n",retarg);
 #endif
 
   return retarg;
 }
 
 static int exitflag = 0;
-static void handle_sigint(__unused int sig) {
+static void handle_sigint(__unusedattr int sig) {
   exitflag = 1;
 }
 
@@ -320,14 +325,29 @@ int main(int argc, char **argv) {
   int64_t ret;
 
   if ((argc != 2) || ((times_max = atoi(argv[1])) < 0)) {
-    dprintf(STDERR_FILENO,"usage: %s <iterations> (zero for benchmarks)\n",argv[0]);
+    MQ_dprintf3("usage: %s <iterations> (zero for benchmarks)\n",argv[0]);
     exit(1);
   }
+
+  void *threadret;
+  pthread_t testthread, testthread2;
+  pthread_attr_t attr;
+  pthread_attr_t attr2;
+
+  if ((ret=pthread_attr_init(&attr))!=0)
+    MQ_dprintf("pthread_attr_init: %s\n",strerror((int)ret));
+  if ((ret=pthread_attr_init(&attr2))!=0)
+    MQ_dprintf("pthread_attr_init: %s\n",strerror((int)ret));
+
+  if ((ret=pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))!=0)
+    MQ_dprintf("pthread_attr_setdetachstate: %s\n",strerror((int)ret));
+  if ((ret=pthread_attr_setdetachstate(&attr2, PTHREAD_CREATE_JOINABLE))!=0)
+    MQ_dprintf("pthread_attr_setdetachstate: %s\n",strerror((int)ret));
 
   MQ_RWLock_t testlock = MQ_RWLOCK_INITIALIZER(MQ_RWLOCK_DEFAULTFLAGS);
 #if 0
   if ((ret=MQ_RWLock_Init(&testlock,MQ_RWLOCK_DEFAULTFLAGS)) < 0) {
-    dprintf(STDERR_FILENO,"MQ_RWLock_Init: %s\n",strerror((int)(-ret)));
+    MQ_dprintf3("MQ_RWLock_Init: %s\n",strerror((int)(-ret)));
     exit(1);
   }
 #endif
@@ -336,11 +356,11 @@ int main(int argc, char **argv) {
   {
     struct sigaction act = { { handle_sigint }, { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, (int)(SA_SIGINFO|SA_RESETHAND), 0 };
     if (sigaction(SIGINT,&act,(struct sigaction *)0)<0) {
-      dprintf(STDERR_FILENO,"sigaction: %s",strerror(errno));
+      MQ_dprintf3("sigaction: %s",strerror(errno));
       exit(1);
     }
     if (sigaction(SIGTERM,&act,(struct sigaction *)0)<0) {
-      dprintf(STDERR_FILENO,"sigaction: %s",strerror(errno));
+      MQ_dprintf("sigaction: %s",strerror(errno));
       exit(1);
     }
   }
@@ -405,7 +425,7 @@ int main(int argc, char **argv) {
     overhead = end-start;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per round benchmarking overhead\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -429,13 +449,13 @@ int main(int argc, char **argv) {
       MQ_SyncInt_Fence_Full();
     }
     if (ret) {
-      dprintf(STDERR_FILENO,"pthread_mutex_{lock,unlock}: %s\n",strerror((int)ret));
+      MQ_dprintf("pthread_mutex_{lock,unlock}: %s\n",strerror((int)ret));
       exit(1);
     }
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per pthread_mutex_{lock,unlock}\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -464,7 +484,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_Mutex_{Lock,Unlock}\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -493,7 +513,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_Mutex_{Lock,Unlock}_Fast\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -516,7 +536,7 @@ int main(int argc, char **argv) {
       MQ_SyncInt_Fence_Full();
     }
     if (ret) {
-      dprintf(STDERR_FILENO,"pthread_mutex_{lock,unlock}: %s\n",strerror((int)ret));
+      MQ_dprintf("pthread_mutex_{lock,unlock}: %s\n",strerror((int)ret));
       exit(1);
     }
     end = MQ_Time_Now() - overhead;
@@ -528,17 +548,17 @@ int main(int argc, char **argv) {
     dprintf(STDERR_FILENO,"%.3fns per pthread_mutex_{lock,unlock}, second run\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
 
 
-    pthread_mutexattr_t attr;
-    if ((ret=pthread_mutexattr_init(&attr)) != 0) {
+    pthread_mutexattr_t attr3;
+    if ((ret=pthread_mutexattr_init(&attr3)) != 0) {
       MQ_dprintf3("pthread_mutexattr_init: %s\n",strerror((int)ret));
       exit(1);
     }
-    if ((ret=pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT)) != 0) {
+    if ((ret=pthread_mutexattr_setprotocol(&attr3, PTHREAD_PRIO_INHERIT)) != 0) {
       MQ_dprintf3("pthread_mutexattr_setprotocol(PTHREAD_PRIO_INHERIT): %s\n",strerror((int)ret));
       exit(1);
     }
     pthread_mutex_destroy(&pmutex);
-    if ((ret=pthread_mutex_init(&pmutex, &attr)) != 0) {
+    if ((ret=pthread_mutex_init(&pmutex, &attr3)) != 0) {
       MQ_dprintf3("pthread_mutex_init: %s\n",strerror((int)ret));
       exit(1);
     }
@@ -578,16 +598,16 @@ int main(int argc, char **argv) {
       goto skip_prio_protect;
     }
 
-    if ((ret=pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_PROTECT)) != 0) {
+    if ((ret=pthread_mutexattr_setprotocol(&attr3, PTHREAD_PRIO_PROTECT)) != 0) {
       MQ_dprintf3("pthread_mutexattr_setprotocol(PTHREAD_PRIO_PROTECT): %s\n",strerror((int)ret));
       exit(1);
     }
-    if ((ret=pthread_mutexattr_setprioceiling(&attr, 1)) != 0) {
+    if ((ret=pthread_mutexattr_setprioceiling(&attr3, 1)) != 0) {
       MQ_dprintf3("pthread_mutexattr_setprioceiling(0): %s\n",strerror((int)ret));
       exit(1);
     }
     pthread_mutex_destroy(&pmutex);
-    if ((ret=pthread_mutex_init(&pmutex, &attr)) != 0) {
+    if ((ret=pthread_mutex_init(&pmutex, &attr3)) != 0) {
       MQ_dprintf3("pthread_mutex_init: %s\n",strerror((int)ret));
       exit(1);
     }
@@ -629,16 +649,16 @@ int main(int argc, char **argv) {
 
   skip_prio_protect:
 
-    if ((ret=pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_NONE)) != 0) {
+    if ((ret=pthread_mutexattr_setprotocol(&attr3, PTHREAD_PRIO_NONE)) != 0) {
       MQ_dprintf3("pthread_mutexattr_setprotocol(PTHREAD_PRIO_NONE): %s\n",strerror((int)ret));
       exit(1);
     }
-    if ((ret=pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK)) != 0) {
+    if ((ret=pthread_mutexattr_settype(&attr3, PTHREAD_MUTEX_ERRORCHECK)) != 0) {
       MQ_dprintf3("pthread_mutexattr_settype(PTHREAD_MUTEX_ERRORCHECK): %s\n",strerror((int)ret));
       exit(1);
     }
     pthread_mutex_destroy(&pmutex);
-    if ((ret=pthread_mutex_init(&pmutex, &attr)) != 0) {
+    if ((ret=pthread_mutex_init(&pmutex, &attr3)) != 0) {
       MQ_dprintf3("pthread_mutex_init: %s\n",strerror((int)ret));
       exit(1);
     }
@@ -661,13 +681,13 @@ int main(int argc, char **argv) {
       MQ_SyncInt_Fence_Full();
     }
     if (ret) {
-      dprintf(STDERR_FILENO,"pthread_mutex_{lock,unlock}: %s\n",strerror((int)ret));
+      MQ_dprintf("pthread_mutex_{lock,unlock}: %s\n",strerror((int)ret));
       exit(1);
     }
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per pthread_mutex_{lock,unlock}, PTHREAD_MUTEX_ERRORCHECK\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -696,7 +716,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_Mutex_Lock, MQ_Unlock\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -725,7 +745,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_W_{Lock,Unlock}\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -756,7 +776,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_W_Lock, MQ_W2R_Lock, MQ_R_Unlock\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -785,7 +805,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_W_Lock, MQ_Unlock\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -814,7 +834,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_R_{Lock,Unlock}\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -845,7 +865,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_R_Lock, MQ_R2W_Lock, MQ_W_Unlock\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -874,7 +894,7 @@ int main(int argc, char **argv) {
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per MQ_R_Lock, MQ_Unlock\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -898,13 +918,13 @@ int main(int argc, char **argv) {
       MQ_SyncInt_Fence_Full();
     }
     if (ret) {
-      dprintf(STDERR_FILENO,"pthread_rwlock_{rdlock,unlock}: %s\n",strerror((int)ret));
+      MQ_dprintf("pthread_rwlock_{rdlock,unlock}: %s\n",strerror((int)ret));
       exit(1);
     }
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per pthread_rwlock_{rdlock,unlock}\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -927,13 +947,13 @@ int main(int argc, char **argv) {
       MQ_SyncInt_Fence_Full();
     }
     if (ret) {
-      dprintf(STDERR_FILENO,"pthread_rwlock_{wrlock,unlock}: %s\n",strerror((int)ret));
+      MQ_dprintf("pthread_rwlock_{wrlock,unlock}: %s\n",strerror((int)ret));
       exit(1);
     }
     end = MQ_Time_Now() - overhead;
     if (ret2<0) {
       /* this can't actually happen but tricks the compiler into using ret instead of optimizing out the overhead loop entirely */
-      dprintf(STDERR_FILENO,"ret2 went negative: %ld\n",ret2);
+      MQ_dprintf("ret2 went negative: %ld\n",ret2);
       exit(1);
     }
     dprintf(STDERR_FILENO,"%.3fns per pthread_rwlock_{wrlock,unlock}\n",((double)(end-start)) / (double)BENCHMARKCYCLES);
@@ -943,20 +963,6 @@ int main(int argc, char **argv) {
 
   int nspins;
   uint64_t futex_trips_possible = 0;
-  void *threadret;
-  pthread_t testthread, testthread2;
-  pthread_attr_t attr;
-  pthread_attr_t attr2;
-
-  if ((ret=pthread_attr_init(&attr))!=0)
-    dprintf(STDERR_FILENO,"pthread_attr_init: %s\n",strerror((int)ret));
-  if ((ret=pthread_attr_init(&attr2))!=0)
-    dprintf(STDERR_FILENO,"pthread_attr_init: %s\n",strerror((int)ret));
-
-  if ((ret=pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))!=0)
-    dprintf(STDERR_FILENO,"pthread_attr_setdetachstate: %s\n",strerror((int)ret));
-  if ((ret=pthread_attr_setdetachstate(&attr2, PTHREAD_CREATE_JOINABLE))!=0)
-    dprintf(STDERR_FILENO,"pthread_attr_setdetachstate: %s\n",strerror((int)ret));
 
  again:
 
@@ -1070,7 +1076,7 @@ int main(int argc, char **argv) {
 
   for (i=0;i<100;++i)
     if ((ret=pthread_create(&testthread,&attr,testroutine_mutex,&testlock))!=0) {
-      dprintf(STDERR_FILENO,"pthread_create: %s\n",strerror((int)ret));
+      MQ_dprintf("pthread_create: %s\n",strerror((int)ret));
       goto out;
     }
 
@@ -1087,7 +1093,7 @@ int main(int argc, char **argv) {
     goto out;
 
   if (MQ_SyncInt_Get(testtot) != MQ_SyncInt_Get(testtot2)) {
-    dprintf(STDERR_FILENO,"testroutine_mutex loop: testtot=%d but testtot2=%d (launchcount=%d)\n",testtot,testtot2,launchcount);
+    MQ_dprintf("testroutine_mutex loop: testtot=%d but testtot2=%d (launchcount=%d)\n",testtot,testtot2,launchcount);
     goto out;
   }
 
@@ -1107,7 +1113,7 @@ int main(int argc, char **argv) {
 
   if ((i=MQ_Cond_Signal(&testlock, 1, (void *)0x987UL, MQ_COND_RETURN_UNLOCKED)) != 0) {
     if (i>1)
-      dprintf(STDERR_FILENO,"MQ_Cond_Signal returned %d but should have returned zero\n",i);
+      MQ_dprintf("MQ_Cond_Signal returned %d but should have returned zero\n",i);
     else
       MQ_dprintf3("MQ_Cond_Signal returned %d/%s\n",i,i<0 ? strerror(-i) : "");
     goto out;
@@ -1124,11 +1130,11 @@ int main(int argc, char **argv) {
     goto out;
   }
   if (threadret != 0) {
-    dprintf(STDERR_FILENO,"MQ_Cond_Wait should not have returned an arg, but did: %p\n",threadret);
+    MQ_dprintf("MQ_Cond_Wait should not have returned an arg, but did: %p\n",threadret);
     goto out;
   }
   if (! MQ_W_HaveLock_p(&testlock)) {
-    dprintf(STDERR_FILENO,"don't have write lock anymore after return from MQ_Cond_Wait\n");
+    MQ_dprintf("don't have write lock anymore after return from MQ_Cond_Wait\n");
     goto out;
   }
 
@@ -1142,7 +1148,7 @@ int main(int argc, char **argv) {
 #endif
     Decrement_Futex_Trips(testlock,1); /* don't count this one -- nothing to do with performance */
   } else {
-    dprintf(STDERR_FILENO,"MQ_R_Lock succeeded, R=%u W=%u, that should have timed out\n",MQ_RWLOCK_R_COUNT(&testlock),MQ_RWLOCK_W_COUNT(&testlock));
+    MQ_dprintf("MQ_R_Lock succeeded, R=%u W=%u, that should have timed out\n",MQ_RWLOCK_R_COUNT(&testlock),MQ_RWLOCK_W_COUNT(&testlock));
     goto out;
   }
 
@@ -1165,7 +1171,7 @@ int main(int argc, char **argv) {
   }
 
   if ((ret=pthread_create(&testthread,&attr2,testroutine_cond,&testlock))!=0) {
-    dprintf(STDERR_FILENO,"pthread_create: %s\n",strerror((int)ret));
+    MQ_dprintf("pthread_create: %s\n",strerror((int)ret));
     goto out;
   }
   /* don't count the inevitable futex() in MQ_Cond_Wait */
@@ -1189,14 +1195,15 @@ int main(int argc, char **argv) {
   ++futex_trips_possible; /* for the LFLL contention between the cond and signal */
 
   if ((ret=pthread_join(testthread,&threadret))!=0) {
-    dprintf(STDERR_FILENO,"pthread_join: %s\n",strerror((int)ret));
+    MQ_dprintf("pthread_join: %s\n",strerror((int)ret));
     goto out;
   }
 
   if (threadret != (void *)0x123UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x123UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x123UL);
     goto out;
   }
+
 
   if ((ret=MQ_R_Lock(&testlock,1L<<30))<0) {
     MQ_dprintf3("MQ_R_Lock before testroutine_cond 2: %s\n",strerror((int)(-ret)));
@@ -1236,7 +1243,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x456UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x456UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x456UL);
     goto out;
   }
 
@@ -1297,7 +1304,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x789UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x789UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x789UL);
     goto out;
   }
 
@@ -1307,7 +1314,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x789UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x789UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x789UL);
     goto out;
   }
 
@@ -1375,7 +1382,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x654UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x654UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x654UL);
     goto out;
   }
 
@@ -1385,7 +1392,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x654UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x654UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x654UL);
     goto out;
   }
 
@@ -1459,7 +1466,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x321UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x321UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x321UL);
     goto out;
   }
 
@@ -1469,7 +1476,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x210UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x210UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x210UL);
     goto out;
   }
 
@@ -1537,7 +1544,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x234UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x234UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x234UL);
     goto out;
   }
 
@@ -1547,7 +1554,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x345UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x345UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x345UL);
     goto out;
   }
 
@@ -1611,7 +1618,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x567UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x234UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x234UL);
     goto out;
   }
 
@@ -1621,7 +1628,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0x678UL) {
-    dprintf(STDERR_FILENO,"testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x345UL);
+    MQ_dprintf("testroutine_cond returned %p, but should be %p\n",threadret,(void *)0x345UL);
     goto out;
   }
 
@@ -1689,7 +1696,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0xabcUL) {
-    dprintf(STDERR_FILENO,"testroutine_cond2 returned %p\n",threadret);
+    MQ_dprintf("testroutine_cond2 returned %p\n",threadret);
     goto out;
   }
 
@@ -1715,7 +1722,7 @@ int main(int argc, char **argv) {
   }
 
   if (threadret != (void *)0xdefUL) {
-    dprintf(STDERR_FILENO,"testroutine_cond3 returned %p\n",threadret);
+    MQ_dprintf("testroutine_cond3 returned %p\n",threadret);
     goto out;
   }
 #endif
@@ -1835,7 +1842,7 @@ int main(int argc, char **argv) {
   ++futex_trips_possible; /* for the LFLL contention between the lock and the wait */
 
   if (threadret != (void *)0xdead6005eUL) {
-    dprintf(STDERR_FILENO,"testroutine_signal cond_wait got %p\n",threadret);
+    MQ_dprintf("testroutine_signal cond_wait got %p\n",threadret);
     goto out;
   }
 #ifdef MQ_DEBUG_MORE
@@ -1864,6 +1871,7 @@ int main(int argc, char **argv) {
 	  MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock)
 	  );
 #endif
+
 
   MQ_SyncInt_Put(testtot,0);
 
@@ -1896,7 +1904,7 @@ int main(int argc, char **argv) {
     usleep(1000);
     ++nspins;
     if (nspins > 1000) {
-      dprintf(STDERR_FILENO,"testtot never made it to %d\n",i);
+      MQ_dprintf("testtot never made it to %d\n",i);
       goto out;
     }
   }
@@ -1918,7 +1926,7 @@ int main(int argc, char **argv) {
   futex_trips_possible += 2;
 
   if (testtot != i) {
-    dprintf(STDERR_FILENO,"\ntesttot after 1ms and obtaining read lock: %d (should be %d), Wait_List_Head=%p, n_waiters=%d\n",testtot,i,testlock.Wait_List_Head,
+    MQ_dprintf("\ntesttot after 1ms and obtaining read lock: %d (should be %d), Wait_List_Head=%p, n_waiters=%d\n",testtot,i,testlock.Wait_List_Head,
 	    MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock));
     goto out;
   }
@@ -1962,7 +1970,7 @@ int main(int argc, char **argv) {
   Decrement_Futex_Trips(testlock,1);
 
   if (testtot != i) {
-    dprintf(STDERR_FILENO,"\ntesttot after obtaining write lock: %d (should be %d), Wait_List_Head=%p, n_waiters=%d\n",testtot,i,testlock.Wait_List_Head,
+    MQ_dprintf("\ntesttot after obtaining write lock: %d (should be %d), Wait_List_Head=%p, n_waiters=%d\n",testtot,i,testlock.Wait_List_Head,
 	    MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock)
 	    );
     goto out;
@@ -1974,7 +1982,7 @@ int main(int argc, char **argv) {
   }
 
   if (testtot != i) {
-    dprintf(STDERR_FILENO,"\ntesttot after getting and releasing W lock: %d (should be %d)\n",testtot,i);
+    MQ_dprintf("\ntesttot after getting and releasing W lock: %d (should be %d)\n",testtot,i);
     goto out;
   }
 
@@ -2058,13 +2066,13 @@ int main(int argc, char **argv) {
     usleep(1000);
     ++nspins;
     if (nspins>100) {
-      dprintf(STDERR_FILENO,"testroutine_r2 blocked on W: %d of 10 didn't complete after unblocking, after %d 1ms spins\n",60-testtot,nspins);
+      MQ_dprintf("testroutine_r2 blocked on W: %d of 10 didn't complete after unblocking, after %d 1ms spins\n",60-testtot,nspins);
       goto out;
     }
   }
 
   if (nspins>5)
-    dprintf(STDERR_FILENO,"10 testroutine_r2 blocked on W took %d 1ms spins to complete when unblocked\n",nspins);
+    MQ_dprintf("10 testroutine_r2 blocked on W took %d 1ms spins to complete when unblocked\n",nspins);
 
   for (i=60;i<100;++i) {
     if ((ret=MQ_R_Lock(&testlock,1L<<30))<0) {
@@ -2098,7 +2106,7 @@ int main(int argc, char **argv) {
   }
 	 /*
   if (testtot != i) {
-    dprintf(STDERR_FILENO,"\n2 testtot after draining LL and {R,W}_Count (%d spins): %d (should be %d), n_waiters=%d\n",nspins,testtot,i,
+    MQ_dprintf("\n2 testtot after draining LL and {R,W}_Count (%d spins): %d (should be %d), n_waiters=%d\n",nspins,testtot,i,
 	    MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock));
     goto out;
   }
@@ -2115,7 +2123,7 @@ int main(int argc, char **argv) {
   }
 
   if (MQ_RWLock_Cur_Waiter_Count(&testlock,0) != 0) {
-    dprintf(STDERR_FILENO,"\nn_waiters spuriously nonzero\n");
+    MQ_dprintf("\nn_waiters spuriously nonzero\n");
     goto out;
   }
 

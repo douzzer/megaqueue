@@ -271,7 +271,7 @@ static void _PeakSchedulingState_MaybeUpdate(union __MQ_SchedState this_base_ss,
 }
 
 
-static void _MQ_ThreadState_Extricate(__unused void *arg);
+static void _MQ_ThreadState_Extricate(__unusedattr void *arg);
 
 int MQ_ThreadState_Init(void) {
   if (__MQ_ThreadState_Pointer)
@@ -280,11 +280,21 @@ int MQ_ThreadState_Init(void) {
   int ret = 0;
   /* use the pthread thread-specific data facility for its cleanup hook */
   static pthread_key_t __MQ_ThreadState_Key;
-  static uint64_t initialized_p = 0;
-  if (! MQ_SyncInt_PostIncrement(initialized_p,1)) {
-    if ((ret=pthread_key_create(&__MQ_ThreadState_Key,_MQ_ThreadState_Extricate)))
-      MQ_returnerrno(ret);
+  static volatile uint32_t initialized_p = 0;
+  if (initialized_p != 2) {
+    if (! MQ_SyncInt_ExchangeIfEq_ReturnOldVal(initialized_p,0,1)) {
+      if ((ret=pthread_key_create(&__MQ_ThreadState_Key,_MQ_ThreadState_Extricate))) {
+	MQ_SyncInt_Put(initialized_p,0);
+	MQ_returnerrno(ret);
+      }
+      MQ_SyncInt_Put(initialized_p,2);
+    } else {
+      while (initialized_p == 1); /* spin baby spin */
+      if (! initialized_p) /* wtf, over */
+	MQ_returnerrno(EINVAL);
+    }
   }
+
   if ((ret=pthread_setspecific(__MQ_ThreadState_Key,&__MQ_ThreadState)))
     MQ_returnerrno(ret);
 
@@ -330,7 +340,7 @@ int _MQ_ThreadState_Count(void) {
   return ret;
 }
 
-static void _MQ_ThreadState_Extricate(__unused void *arg) {
+static void _MQ_ThreadState_Extricate(__unusedattr void *arg) {
   MQ_SyncInt_ExchangeIfEq(__MQ_TID_To_ThreadState_Table[__MQ_ThreadState.tid % __MQ_TID_TO_THREADSTATE_TABLE_ENTS], __MQ_ThreadState_Pointer, (struct __MQ_ThreadState *)0);
 
   if (__MQ_ThreadState.CurSchedState.policy_and_priority != __PeakSchedState.policy_and_priority)

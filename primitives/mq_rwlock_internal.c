@@ -184,7 +184,7 @@ int _MQ_RWLock_LockState_Initialize(MQ_RWLock_t *l) {
   return 0;
 }
 
-void _MQ_RWLock_LockState_Extricate(__unused MQ_RWLock_t *l) {
+__constfunc void _MQ_RWLock_LockState_Extricate(__unusedattr MQ_RWLock_t *l) {
 }
 
 
@@ -1002,7 +1002,7 @@ void _MQ_RWLock_ThreadCleanup(void) {
     MQ_RWLock_t *l = MQ_RWLOCK_TRACK_POINTER(__MQ_RWLock_ThreadState.HeldLocks[lock_index]);
     if (! l)
       continue;
-    if (l->Flags & MQ_RWLOCK_TRACK_DUMMY)
+    if (l->Flags & MQ_RWLOCK_DUMMY)
       continue;
     if (l->Flags & MQ_RWLOCK_ABORTONMISUSE)
       abort();
@@ -1210,7 +1210,8 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
    * after getting the mutex, whether the mutex was gotten here or was uncontended.
    * (there are races with the tests of LFList_Tail in the unlock routines.)
    */
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(l) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
 
   struct timespec ts;
   MQ_Time_t start_waiting_at, failsafe_wait_nsecs;
@@ -1785,7 +1786,8 @@ __wur int _MQ_W_Lock_contended(MQ_RWLock_t *l, MQ_Time_t wait_nsecs, const char 
     goto out;
   }
 
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(l) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
 
   if (MQ_RWLOCK_RW_LOCKED_P(l))
     ret = _MQ_RWLock_Wait(l, MQ_LOCK_WAIT_W, wait_nsecs, 0, LFList_ID, file, line, func);
@@ -1817,11 +1819,8 @@ __wur int _MQ_W2R_Lock_contended(MQ_RWLock_t *l) {
   if ((ret=_MQ_RWLock_MutEx_Lock(l,0))<0)
     return (int)ret;
 
-  /* note, not setting RW.Count _CONTENDED here, because we're not doing anything here that needs it.
-   * specifically, the held W lock excludes all until we (implicitly atomically) change it to a held R lock,
-   * and we don't do anything after that with RW.Count.
-   */
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(l) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
 
   if (l->Flags & MQ_RWLOCK_RECURSION) {
     if (MQ_RWLOCK_RW_COUNT(l) != 1) {
@@ -1853,7 +1852,8 @@ __wur int _MQ_R2W_Lock_contended(MQ_RWLock_t *l, MQ_Time_t wait_nsecs, const cha
   if (LFList_ID<0)
     return (int)LFList_ID;
 
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(l) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
 
   if (MQ_RWLOCK_RW_COUNT(l) > 1)
     ret = _MQ_RWLock_Wait(l, MQ_LOCK_WAIT_R2W, wait_nsecs, 0, LFList_ID, file, line, func);
@@ -1883,9 +1883,13 @@ int _MQ_W_Unlock_contended(MQ_RWLock_t *l) {
   if ((ret=_MQ_RWLock_MutEx_Lock(l,0))<0)
     goto out;
 
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(l) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
 
-  if (! l->Wait_List_Head) {
+  if ((! l->Wait_List_Head) ||
+      /* if all the waiters are cond waiters, they aren't actually contending. */
+      ((l->Wait_List_Head->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)) &&
+       (l->Wait_List_Tail->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)))) {
     if (MQ_RWLOCK_RW_RAWCOUNT(l) == (MQ_RWLOCK_COUNT_CONTENDED|1UL)) {
       MQ_TSA_Invalidate(l->RW.Owner); /* leave a mark */
       if (MQ_SyncInt_Get(l->LFList_Tail))
@@ -1940,7 +1944,8 @@ __wur int _MQ_R_Lock_contended(MQ_RWLock_t *l, MQ_Time_t wait_nsecs, const char 
   if ((ret = _MQ_RWLock_MutEx_Lock(l,&wait_nsecs))<0)
     goto out;
 
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(l) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
 
   if (MQ_RWLOCK_W_NOTLOCKED_P(l) &&
       ((l->Wait_List_Head == 0) || /* have to wait if there's an R2W pending */
@@ -1995,12 +2000,16 @@ int _MQ_R_Unlock_contended(MQ_RWLock_t *l) {
     MQ_returnerrno_or_abort(EINVAL,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
   }
 
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(l) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(l),MQ_RWLOCK_COUNT_CONTENDED);
 
   MQ_RWLOCK_R_DOWN(l);
 
   if (MQ_RWLOCK_RW_COUNT(l) <= 1) { /* 1, not 0, because there may be an R2W waiting */
-    if (l->Wait_List_Head) {
+    if (l->Wait_List_Head &&
+	/* if all the waiters are cond waiters, they aren't actually contending. */
+	(! ((l->Wait_List_Head->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)) &&
+	    (l->Wait_List_Tail->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED))))) {
       ret = _MQ_RWLock_Signal_1(l);
       int ret2 = _MQ_RWLock_MutEx_Unlock(l);
       if (ret2)
@@ -2016,7 +2025,10 @@ int _MQ_R_Unlock_contended(MQ_RWLock_t *l) {
       ret = _MQ_RWLock_MutEx_Unlock(l);
     }
   } else {
-    if ((! l->Wait_List_Head) && (! MQ_SyncInt_Get(l->LFList_Tail))) {
+    if (((! l->Wait_List_Head) ||
+	 ((l->Wait_List_Head->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)) &&
+	  (l->Wait_List_Tail->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED))))
+	&& (! MQ_SyncInt_Get(l->LFList_Tail))) {
       union __MQ_SchedState start_lock_ss = { .EnBloc = l->SchedState.EnBloc };
       MQ_SyncInt_Put(l->SchedState.EnBloc,0UL);
       if (start_lock_ss.EnBloc)
@@ -2329,7 +2341,8 @@ int _MQ_Cond_Signal(MQ_RWLock_t *cond, int maxtowake, void *arg, uint64_t flags,
       LFList_ID = 1;
   }
 
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(cond),MQ_RWLOCK_COUNT_CONTENDED); /* this also implicitly aborts RTM trans, if any */
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(cond) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(cond),MQ_RWLOCK_COUNT_CONTENDED); /* this also implicitly aborts RTM trans, if any */
 
   if ((cond->Flags & MQ_RWLOCK_WAITLIST_DIRTY) && (MQ_SyncInt_Get(cond->Flags) & MQ_RWLOCK_WAITLIST_DIRTY)) {
     if (cond->Flags & MQ_RWLOCK_ABORTWHENCORRUPTED)
@@ -2591,6 +2604,7 @@ int _MQ_Cond_Signal(MQ_RWLock_t *cond, int maxtowake, void *arg, uint64_t flags,
 }
 
 #ifndef MQ_NO_PTHREADS
+
 static void _MQ_RWLock_Wait_cleanup_handler(struct MQ_Lock_Wait_Ent *ent) {
   int64_t lockret;
 
@@ -2848,6 +2862,11 @@ static __wur int _MQ_RWLock_Wait_1(MQ_RWLock_t *l, MQ_Wait_Type what, MQ_Time_t 
   if (__MQ_RWLock_ThreadState.BlockedOnLock.ID_with_status && (l->Flags & MQ_RWLOCK_INHERITPRIORITY))
     (void)_MQ_SchedState_UpdateLockForBlockedThread(__MQ_ThreadState_Pointer);
 
+  /* if all the waiters are cond waiters, they aren't actually contending. */
+  if ((l->Wait_List_Head->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)) &&
+      (l->Wait_List_Tail->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)))
+    MQ_RWLOCK_RW_RAWCOUNT(l) &= ~MQ_RWLOCK_COUNT_CONTENDED;
+
   if (what == MQ_COND_WAIT_MUTEX_RETUNLOCKED) {
     if ((ret=_MQ_RWLock_MutEx_Unlock_tracking(l))<0)
       return ret;
@@ -2864,6 +2883,7 @@ static __wur int _MQ_RWLock_Wait_1(MQ_RWLock_t *l, MQ_Wait_Type what, MQ_Time_t 
   volatile MQ_Time_t start_waiting_at;
 
 #ifndef MQ_NO_PTHREADS
+
   pthread_cleanup_push(_MQ_RWLock_Wait_cleanup_handler,&ent);
 
   if (what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)) {
@@ -3053,7 +3073,8 @@ __wur int _MQ_Cond_Wait(MQ_RWLock_t *cond, MQ_Time_t maxwait, void **arg, uint64
       LFList_ID = 1;
   }
 
-  MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(cond),MQ_RWLOCK_COUNT_CONTENDED);
+  if (! (MQ_RWLOCK_RW_RAWCOUNT(cond) & MQ_RWLOCK_COUNT_CONTENDED))
+    MQ_SyncInt_SetFlags(MQ_RWLOCK_RW_RAWCOUNT(cond),MQ_RWLOCK_COUNT_CONTENDED);
 
   MQ_Wait_Type what;
 
