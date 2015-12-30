@@ -562,7 +562,7 @@ mutex, the mutex will always be successfully obtained.
   /* make sure this lock doesn't stay in or escape to uncontended status while participating in PI, as that would cause owner elevation to leak */
 
   int got_mutex;
-  if (l->MutEx.Owner != MQ_TSA) {
+  if (l->MutEx.InPieces.Owner != MQ_TSA) {
     int64_t mutex_ret;
     MQ_Time_t timeout = MQ_ONE_SECOND/100; /* never deadlock inside the PI system, even when application in error */
     if ((mutex_ret=_MQ_RWLock_MutEx_Lock(l,&timeout))<0)
@@ -582,7 +582,7 @@ mutex, the mutex will always be successfully obtained.
    */
 
   struct __MQ_ThreadState *rw_owner_thr;
-  if ((MQ_TSA_ValidP(l->RW.Owner)) && (l->RW.Owner != exclude_thread) && (l->RW.Owner != MQ_TSA) && (! _MQ_ThreadState_Assoc_ByTID_prelocked(l->RW.Owner, &rw_owner_thr))) {
+  if ((MQ_TSA_ValidP(l->RW.InPieces.Owner)) && (l->RW.InPieces.Owner != exclude_thread) && (l->RW.InPieces.Owner != MQ_TSA) && (! _MQ_ThreadState_Assoc_ByTID_prelocked(l->RW.InPieces.Owner, &rw_owner_thr))) {
 
     /* now have the owner threadstate and a recent schedstate for it.
      * adjust it as indicated and possible, and if it's currently
@@ -593,7 +593,7 @@ mutex, the mutex will always be successfully obtained.
 
     _MQ_SchedState_UpdateThread_1(rw_owner_thr, l);
 
-  } else if (l->RW.Count&MQ_RWLOCK_COUNT_READ) {
+  } else if (l->RW.InPieces.Count&MQ_RWLOCK_COUNT_READ) {
     /* high comedy: iterate through every held lock of every registered thread, looking for l.  such are the wages of PI on shared locks. */
 
     /* there is no race here because the HeldLock is removed before
@@ -708,7 +708,7 @@ static int _MQ_SchedState_UpdateLockForBlockedThread_1(struct __MQ_ThreadState *
   /* second, update the implicated lock to reflect the thread's CurSchedState */
 
   int got_mutex;
-  if (l->MutEx.Owner != MQ_TSA) {
+  if (l->MutEx.InPieces.Owner != MQ_TSA) {
     int64_t mutex_ret;
     MQ_Time_t timeout = MQ_ONE_SECOND/100; /* never deadlock inside the PI system, even when application in error */
     if ((mutex_ret=_MQ_RWLock_MutEx_Lock(l,&timeout))<0) {
@@ -1022,7 +1022,7 @@ __wur int _MQ_MutEx_Lock_RTM(MQ_RWLock_t *l) {
     uint32_t rtm_status;
     rtm_status = _xbegin();
     if (rtm_status == _XBEGIN_STARTED) {
-      if (! l->MutEx.Count) {
+      if (! l->MutEx.InPieces.Count) {
 	__MQ_RWLock_ThreadState.HeldLocks[__MQ_RWLock_ThreadState.HeldLocks_Index++].ID_with_status = (uint64_t)l|(MQ_RWLOCK_TRACK_RTM|MQ_RWLOCK_TRACK_MUTEX);
 	return 0;
       } else
@@ -1036,7 +1036,7 @@ __wur int _MQ_MutEx_Lock_RTM(MQ_RWLock_t *l) {
       if (maxspins > MQ_RWLOCK_ADAPTIVE_MAX_SPINS)
 	maxspins = MQ_RWLOCK_ADAPTIVE_MAX_SPINS;
       for (nspins=maxspins;nspins;--nspins)
-	if (! l->MutEx.Count)
+	if (! l->MutEx.InPieces.Count)
 	  break;
       if (nspins)
 	continue;
@@ -1066,8 +1066,9 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
       (MQ_SCHEDSTATE_POINTER(__MQ_ThreadState.CurSchedState) != &__PeakSchedState))
     MQ_returnerrno_or_abort(EINVAL,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
 
-  if (l->MutEx.Count == MQ_RWLOCK_COUNT_INITIALIZER) {
-    union MQ_LockCore start_core = { .Count = MQ_RWLOCK_COUNT_INITIALIZER, .Owner = MQ_TSA_INVALIDOWNER }, end_core = { .Count = 1, .Owner = MQ_TSA };
+  if (l->MutEx.InPieces.Count == MQ_RWLOCK_COUNT_INITIALIZER) {
+    union MQ_LockCore start_core = { .EnBloc = MQ_LockCore_MkEnBloc(MQ_TSA_INVALIDOWNER,MQ_RWLOCK_COUNT_INITIALIZER) },
+      end_core = { .EnBloc = MQ_LockCore_MkEnBloc(MQ_TSA,1) };
     if (MQ_SyncInt_ExchangeIfEq(l->MutEx.EnBloc,start_core.EnBloc,end_core.EnBloc)) {
       _MQ_RWLock_LockState_Initialize(l);
       return 0;
@@ -1089,7 +1090,7 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
 
   int ret;
 
-  if (! MQ_SyncInt_PostIncrement(l->MutEx.Count,1)) {
+  if (! MQ_SyncInt_PostIncrement(l->MutEx.InPieces.Count,1)) {
     ret = 0;
     goto out;
   }
@@ -1099,7 +1100,7 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
   int nspins;
 
   /* try adaptive spin locking first, but only if there's no one else in line */
-  if ((l->Flags & MQ_RWLOCK_ADAPTIVE) && (l->MutEx.Count <= 2) && MQ_SyncInt_ExchangeIfEq(l->LFList_Head_Lock,0,MQ_TSA /*|0x10000000*/)) {
+  if ((l->Flags & MQ_RWLOCK_ADAPTIVE) && (l->MutEx.InPieces.Count <= 2) && MQ_SyncInt_ExchangeIfEq(l->LFList_Head_Lock,0,MQ_TSA /*|0x10000000*/)) {
     /* Kaz Kylheku's algorithm for opportunistic dynamically tuned spin mutex acquisition in lieu of FUTEX_WAIT
      * (also preempts the FUTEX_WAKE in the unlocker).
      */
@@ -1111,8 +1112,8 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
       maxspins = MQ_RWLOCK_ADAPTIVE_MAX_SPINS;
     /* the optimizer does this for us (convert countup to countdown, to make the test cheap) but be completely sure: */
     for (ret=nspins=maxspins;nspins;--nspins) {
-      if (l->MutEx.Count == 1) { /* that's us! */
-	l->MutEx.Owner = MQ_TSA;
+      if (l->MutEx.InPieces.Count == 1) { /* that's us! */
+	l->MutEx.InPieces.Owner = MQ_TSA;
 	l->LFList_Head_Lock = 0;
 	if (nspins<maxspins)
 	  l->MutEx_Spin_Estimator += (((maxspins-nspins) - l->MutEx_Spin_Estimator)/16);
@@ -1133,19 +1134,19 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
   }
 
   if (l->Flags & MQ_RWLOCK_INACTIVE) {
-    MQ_SyncInt_Decrement(l->MutEx.Count,1);
+    MQ_SyncInt_Decrement(l->MutEx.InPieces.Count,1);
     ret = MQ_seterrpoint(ECANCELED);
     goto out;
   }
 
-  if (l->MutEx.Owner == MQ_TSA) {
-    MQ_SyncInt_Decrement(l->MutEx.Count,1);
+  if (l->MutEx.InPieces.Owner == MQ_TSA) {
+    MQ_SyncInt_Decrement(l->MutEx.InPieces.Count,1);
     ret = MQ_seterrpoint_or_abort(EDEADLK,l->Flags & MQ_RWLOCK_ABORTONEDEADLK);
     goto out;
   }
 
   /* _MQ_RWLock_MutEx_Lock() called here because MutEx != 1, deliberately more restrictive than > 1, to make it free to call here and detect that it's haywire */
-  if (MQ_SyncInt_Get(l->MutEx.Count) <= 0) {
+  if (MQ_SyncInt_Get(l->MutEx.InPieces.Count) <= 0) {
     if (l->Flags & MQ_RWLOCK_ABORTWHENCORRUPTED)
       MQ_abort();
     MQ_SyncInt_SetFlags(l->Flags,MQ_RWLOCK_LFLIST_CORRUPTED);
@@ -1235,8 +1236,8 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
     }
 
     if (l->Flags & MQ_RWLOCK_ROBUST) {
-      pid_t MutEx_Locker = MQ_TSA_To_TID(MQ_SyncInt_Get(l->MutEx.Owner));
-      if ((MutEx_Locker > 0) && (kill(MutEx_Locker,0)<0) && (errno == ESRCH) && (MQ_TSA_To_TID(MQ_SyncInt_Get(l->MutEx.Owner)) == MutEx_Locker))
+      pid_t MutEx_Locker = MQ_TSA_To_TID(MQ_SyncInt_Get(l->MutEx.InPieces.Owner));
+      if ((MutEx_Locker > 0) && (kill(MutEx_Locker,0)<0) && (errno == ESRCH) && (MQ_TSA_To_TID(MQ_SyncInt_Get(l->MutEx.InPieces.Owner)) == MutEx_Locker))
 	handlecorruption();
     }
 
@@ -1366,7 +1367,7 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
       }
 
       union __MQ_SchedState start_lock_ss = { .EnBloc = l->SchedState.EnBloc };
-      if ((MQ_SyncInt_Decrement(l->MutEx.Count,1) <= 1) && (start_lock_ss.EnBloc)) {
+      if ((MQ_SyncInt_Decrement(l->MutEx.InPieces.Count,1) <= 1) && (start_lock_ss.EnBloc)) {
 	union __MQ_SchedState end_lock_ss;
 	if (! l->Wait_List_Head)
 	  end_lock_ss.EnBloc = 0UL;
@@ -1475,7 +1476,7 @@ int _MQ_RWLock_MutEx_Lock_contended(MQ_RWLock_t *l, MQ_Time_t *wait_nsecs) {
  out:
 
   if (! ret)
-    l->MutEx.Owner = MQ_TSA; /* async signal safety depends on this happening before clearing __MQ_RWLock_AsyncLock */
+    l->MutEx.InPieces.Owner = MQ_TSA; /* async signal safety depends on this happening before clearing __MQ_RWLock_AsyncLock */
 
   if (__MQ_RWLock_AsyncLock[1])
     __MQ_RWLock_AsyncLock[1] = 0;
@@ -1496,17 +1497,17 @@ int _MQ_RWLock_MutEx_Unlock_contended(MQ_RWLock_t *l) {
   MQ_TSA_t MutEx_Locker_start = MQ_TSA_MkInvalid(MQ_TSA); /* invalidated it right before calling _MQ_RWLock_MutEx_Unlock_contended() */
 
   /* check for and exploit an adaptive spin in progress (if we don't catch it here, pre-LFList_Head_Lock, we'll catch after getting the lock) */
-  if (l->LFList_Head_Lock && (l->MutEx.Count == 1)) {
+  if (l->LFList_Head_Lock && (l->MutEx.InPieces.Count == 1)) {
     int maxspins = l->MutEx_Spin_Estimator << 1;
     if (maxspins > MQ_RWLOCK_ADAPTIVE_MAX_SPINS)
       maxspins = MQ_RWLOCK_ADAPTIVE_MAX_SPINS;
     for (ret=nspins=maxspins;nspins;--nspins) {
-      if (l->MutEx.Owner != MutEx_Locker_start)
+      if (l->MutEx.InPieces.Owner != MutEx_Locker_start)
 	return 0;
     }
   }
 
-  if (! MQ_RWLOCK_COUNT_VALID_P(l->MutEx.Count)) {
+  if (! MQ_RWLOCK_COUNT_VALID_P(l->MutEx.InPieces.Count)) {
     if (l->Flags & MQ_RWLOCK_ABORTWHENCORRUPTED)
       MQ_abort();
     MQ_SyncInt_SetFlags(l->Flags,MQ_RWLOCK_LFLIST_CORRUPTED);
@@ -1537,7 +1538,7 @@ int _MQ_RWLock_MutEx_Unlock_contended(MQ_RWLock_t *l) {
      * spinning.  If so, the lock has moved on and we need to bail.
      */
     int got_head_lock = 0;
-    spinassert((! l->MutEx.Count) || (l->MutEx.Owner != MutEx_Locker_start) || (got_head_lock = MQ_SyncInt_ExchangeIfEq(l->LFList_Head_Lock,0,MQ_TSA /*|0x40000000*/)));
+    spinassert((! l->MutEx.InPieces.Count) || (l->MutEx.InPieces.Owner != MutEx_Locker_start) || (got_head_lock = MQ_SyncInt_ExchangeIfEq(l->LFList_Head_Lock,0,MQ_TSA /*|0x40000000*/)));
     if (! got_head_lock) {
       ret = 0;
       goto out;
@@ -1554,7 +1555,7 @@ int _MQ_RWLock_MutEx_Unlock_contended(MQ_RWLock_t *l) {
        * intrinsically, if MutEx_Locker changes while we twiddle our
        * thumbs here, that means we were called spuriously.
        */
-      if (! l->MutEx.Count) {
+      if (! l->MutEx.InPieces.Count) {
 	ret = 0;
 	goto out;
       }
@@ -1580,7 +1581,7 @@ int _MQ_RWLock_MutEx_Unlock_contended(MQ_RWLock_t *l) {
       break;
   }
 
-  if (MQ_SyncInt_Get(l->MutEx.Owner) != MutEx_Locker_start) {
+  if (MQ_SyncInt_Get(l->MutEx.InPieces.Owner) != MutEx_Locker_start) {
     l->LFList_Head_Lock = 0;
     ret = 0;
     goto out;
@@ -1618,7 +1619,7 @@ int _MQ_RWLock_MutEx_Unlock_contended(MQ_RWLock_t *l) {
 
       {
 	volatile int *futexp = &orig_head->granted;
-	if (MQ_TSA_ValidP(MQ_SyncInt_Get(l->MutEx.Owner)))
+	if (MQ_TSA_ValidP(MQ_SyncInt_Get(l->MutEx.InPieces.Owner)))
 	  handlecorruption();
 	MQ_SyncInt_Put(orig_head->granted,1);
 	(void)futex(futexp,FUTEX_WAKE,1,0,0,0); /* it is possible, though unlikely, that the FUTEX_WAITer never waited, because granted was set
@@ -1749,12 +1750,12 @@ __wur static __always_inline int _MQ_RWLock_Wait(MQ_RWLock_t *l, MQ_Wait_Type wh
 }
 
 /* note that the _UP and _DOWN macros can only be safely used while holding the mutex, and when MQ_RWLOCK_COUNT_CONTENDED is set, disabling atomic operations on RW.Count */
-#define MQ_RWLOCK_R_UP(l) (((l)->RW.Count&MQ_RWLOCK_COUNT_READ) ? ++(l)->RW.Count : (((l)->RW.Count) |= (MQ_RWLOCK_COUNT_READ|1)))
-#define MQ_RWLOCK_R_DOWN(l) ((--(l)->RW.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)) ? (l)->RW.Count : ((l)->RW.Count &= ~MQ_RWLOCK_COUNT_READ))
+#define MQ_RWLOCK_R_UP(l) (((l)->RW.InPieces.Count&MQ_RWLOCK_COUNT_READ) ? ++(l)->RW.InPieces.Count : (((l)->RW.InPieces.Count) |= (MQ_RWLOCK_COUNT_READ|1)))
+#define MQ_RWLOCK_R_DOWN(l) ((--(l)->RW.InPieces.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)) ? (l)->RW.InPieces.Count : ((l)->RW.InPieces.Count &= ~MQ_RWLOCK_COUNT_READ))
 /* MQ_RWLOCK_W_UP() is used inline so appears in mq_rwlock.c */
-#define MQ_RWLOCK_W_DOWN(l) (--(l)->RW.Count)
-#define MQ_RWLOCK_RW_R2W(l) ((l)->RW.Count &= ~MQ_RWLOCK_COUNT_READ)
-#define MQ_RWLOCK_RW_W2R(l) ((l)->RW.Count |= MQ_RWLOCK_COUNT_READ)
+#define MQ_RWLOCK_W_DOWN(l) (--(l)->RW.InPieces.Count)
+#define MQ_RWLOCK_RW_R2W(l) ((l)->RW.InPieces.Count &= ~MQ_RWLOCK_COUNT_READ)
+#define MQ_RWLOCK_RW_W2R(l) ((l)->RW.InPieces.Count |= MQ_RWLOCK_COUNT_READ)
 
 static __wur inline int MQ_Wait_Type_OK_p(MQ_Wait_Type what) {
   if ((what < MQ_WAIT_TYPE_MIN) || (what > MQ_WAIT_TYPE_MAX) || (__popcount(what) != 1))
@@ -1793,7 +1794,7 @@ __wur int _MQ_W_Lock_contended(MQ_RWLock_t *l, MQ_Time_t wait_nsecs, const char 
     ret = _MQ_RWLock_Wait(l, MQ_LOCK_WAIT_W, wait_nsecs, 0, LFList_ID, file, line, func);
   else {
     MQ_RWLOCK_W_UP(l);
-    l->RW.Owner = MQ_TSA;
+    l->RW.InPieces.Owner = MQ_TSA;
     ret = _MQ_RWLock_MutEx_Unlock(l);
   }
 
@@ -1833,7 +1834,7 @@ __wur int _MQ_W2R_Lock_contended(MQ_RWLock_t *l) {
   if (l->Flags & MQ_RWLOCK_STATISTICS)
     MQ_SyncInt_Increment(l->R_Reqs,1);
 
-  MQ_TSA_Invalidate(l->RW.Owner); /* leave a mark */
+  MQ_TSA_Invalidate(l->RW.InPieces.Owner); /* leave a mark */
   MQ_RWLOCK_RW_W2R(l);
   (void)_MQ_RWLock_Signal(l);
 
@@ -1859,7 +1860,7 @@ __wur int _MQ_R2W_Lock_contended(MQ_RWLock_t *l, MQ_Time_t wait_nsecs, const cha
     ret = _MQ_RWLock_Wait(l, MQ_LOCK_WAIT_R2W, wait_nsecs, 0, LFList_ID, file, line, func);
   else {
     MQ_RWLOCK_RW_R2W(l);
-    l->RW.Owner = MQ_TSA;
+    l->RW.InPieces.Owner = MQ_TSA;
     ret = _MQ_RWLock_MutEx_Unlock(l);
   }
 
@@ -1891,7 +1892,7 @@ int _MQ_W_Unlock_contended(MQ_RWLock_t *l) {
       ((l->Wait_List_Head->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)) &&
        (l->Wait_List_Tail->what & (MQ_COND_WAIT_R|MQ_COND_WAIT_R_RETUNLOCKED|MQ_COND_WAIT_W|MQ_COND_WAIT_W_RETUNLOCKED|MQ_COND_WAIT_MUTEX|MQ_COND_WAIT_MUTEX_RETUNLOCKED)))) {
     if (MQ_RWLOCK_RW_RAWCOUNT(l) == (MQ_RWLOCK_COUNT_CONTENDED|1UL)) {
-      MQ_TSA_Invalidate(l->RW.Owner); /* leave a mark */
+      MQ_TSA_Invalidate(l->RW.InPieces.Owner); /* leave a mark */
       if (MQ_SyncInt_Get(l->LFList_Tail))
 	--MQ_RWLOCK_RW_RAWCOUNT(l);
       else {
@@ -1910,7 +1911,7 @@ int _MQ_W_Unlock_contended(MQ_RWLock_t *l) {
 
   MQ_RWLOCK_W_DOWN(l);
   if (! MQ_RWLOCK_RW_LOCKED_P(l)) { /* when recursive, this may not have gone to zero. */
-    MQ_TSA_Invalidate(l->RW.Owner); /* leave a mark */
+    MQ_TSA_Invalidate(l->RW.InPieces.Owner); /* leave a mark */
     ret = _MQ_RWLock_Signal(l);
   } else
     ret = _MQ_RWLock_MutEx_Unlock(l);
@@ -1931,7 +1932,7 @@ __wur int _MQ_R_Lock_contended(MQ_RWLock_t *l, MQ_Time_t wait_nsecs, const char 
 
   int64_t ret;
 
-  if (l->RW.Owner == MQ_TSA)
+  if (l->RW.InPieces.Owner == MQ_TSA)
     MQ_returnerrno_or_abort(EDEADLK,l->Flags & MQ_RWLOCK_ABORTONEDEADLK);
 
   int got_peak_pri = 0;
@@ -2057,7 +2058,7 @@ static __wur int64_t _MQ_RWLock_MutEx_Lock_tracking(MQ_RWLock_t *l, MQ_Time_t *w
 
   int64_t ret;
 
-  if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY) && (l->MutEx.Owner != MQ_TSA)) {
+  if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY) && (l->MutEx.InPieces.Owner != MQ_TSA)) {
     if ((ret=_MQ_SchedState_Inherit(l))<0) {
       --__MQ_RWLock_ThreadState.HeldLocks_Index;
       return ret;
@@ -2100,7 +2101,7 @@ static int _MQ_RWLock_MutEx_Unlock_tracking(MQ_RWLock_t *l) {
 
   int ret = _MQ_RWLock_MutEx_Unlock(l);
 
-  if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY) && (l->MutEx.Owner != MQ_TSA)) {
+  if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY) && (l->MutEx.InPieces.Owner != MQ_TSA)) {
     int ret2;
     if ((ret2=_MQ_SchedState_Disinherit(l))<0)
       return ret2;
@@ -2237,7 +2238,7 @@ static int _MQ_RWLock_Signal_1(MQ_RWLock_t *l) {
   case MQ_LOCK_WAIT_R2W:
     if (MQ_RWLOCK_R_COUNT(l) == 1) {
       MQ_RWLOCK_RW_R2W(l);
-      l->RW.Owner = i->Waiter_TSA;
+      l->RW.InPieces.Owner = i->Waiter_TSA;
       MQ_RWLock_snip_from_Wait_List(l,i);
 
       if (l->Flags & MQ_RWLOCK_INHERITPRIORITY)
@@ -2263,7 +2264,7 @@ static int _MQ_RWLock_Signal_1(MQ_RWLock_t *l) {
   case MQ_LOCK_WAIT_W:
     if (! MQ_RWLOCK_RW_LOCKED_P(l)) {
       MQ_RWLOCK_W_UP(l);
-      l->RW.Owner = i->Waiter_TSA;
+      l->RW.InPieces.Owner = i->Waiter_TSA;
       MQ_RWLock_snip_from_Wait_List(l,i);
 
       if (l->Flags & MQ_RWLOCK_INHERITPRIORITY)
@@ -2320,7 +2321,7 @@ int _MQ_Cond_Signal(MQ_RWLock_t *cond, int maxtowake, void *arg, uint64_t flags,
     MQ_SyncInt_Increment(cond->S_Reqs,1);
 
   int64_t LFList_ID;
-  if (cond->MutEx.Owner == MQ_TSA) /* caller may be using the mutex to lock in, via MQ_Mutex_Lock() -- that's fine as long as we notice! */
+  if (cond->MutEx.InPieces.Owner == MQ_TSA) /* caller may be using the mutex to lock in, via MQ_Mutex_Lock() -- that's fine as long as we notice! */
     LFList_ID = 0;
   else {
     if (cond->Flags & MQ_RWLOCK_INHERITPRIORITY) {
@@ -2355,10 +2356,10 @@ int _MQ_Cond_Signal(MQ_RWLock_t *cond, int maxtowake, void *arg, uint64_t flags,
   }
 
   if (flags & MQ_COND_RETURN_UNLOCKED) {
-    if (cond->RW.Owner == MQ_TSA) {
+    if (cond->RW.InPieces.Owner == MQ_TSA) {
       _MQ_W_DropLock(cond);
       MQ_RWLOCK_W_DOWN(cond);
-      MQ_TSA_Invalidate(cond->RW.Owner); /* leave a mark */
+      MQ_TSA_Invalidate(cond->RW.InPieces.Owner); /* leave a mark */
       if (cond->Flags & MQ_RWLOCK_DEBUGGING) {
 	cond->last_W_Unlocker_file = file;
 	cond->last_W_Unlocker_line = line;
@@ -2525,7 +2526,7 @@ int _MQ_Cond_Signal(MQ_RWLock_t *cond, int maxtowake, void *arg, uint64_t flags,
       i->granted = 1;
     else if (! MQ_RWLOCK_RW_LOCKED_P(cond)) {
       MQ_RWLOCK_W_UP(cond);
-      cond->RW.Owner = i->Waiter_TSA;
+      cond->RW.InPieces.Owner = i->Waiter_TSA;
       i->granted = 1;
     } else {
       /* woken, but alas right back into a wait */
@@ -2710,7 +2711,7 @@ static __wur int _MQ_RWLock_Wait_1(MQ_RWLock_t *l, MQ_Wait_Type what, MQ_Time_t 
 
     if (rwcount_at_entry == (1UL|MQ_RWLOCK_COUNT_READ)) {
       MQ_RWLOCK_RW_R2W(l);
-      l->RW.Owner = MQ_TSA;
+      l->RW.InPieces.Owner = MQ_TSA;
       return _MQ_RWLock_MutEx_Unlock(l);
     }
 
@@ -2735,7 +2736,7 @@ static __wur int _MQ_RWLock_Wait_1(MQ_RWLock_t *l, MQ_Wait_Type what, MQ_Time_t 
       if ((ret=_MQ_W_DropLock(l))<0)
 	goto out;
     }
-    MQ_TSA_Invalidate(l->RW.Owner); /* leave a mark */
+    MQ_TSA_Invalidate(l->RW.InPieces.Owner); /* leave a mark */
     MQ_RWLOCK_W_DOWN(l);
     if ((! MQ_RWLOCK_RW_LOCKED_P(l)) &&
 	l->Wait_List_Head)
@@ -2793,7 +2794,7 @@ static __wur int _MQ_RWLock_Wait_1(MQ_RWLock_t *l, MQ_Wait_Type what, MQ_Time_t 
 
   case MQ_LOCK_WAIT_R:
 
-    if (l->RW.Owner == MQ_TSA) {
+    if (l->RW.InPieces.Owner == MQ_TSA) {
       ret = MQ_seterrpoint_or_abort(EDEADLK,l->Flags & MQ_RWLOCK_ABORTONEDEADLK);
       goto out;
     }
@@ -2810,14 +2811,14 @@ static __wur int _MQ_RWLock_Wait_1(MQ_RWLock_t *l, MQ_Wait_Type what, MQ_Time_t 
   case MQ_LOCK_WAIT_W:
 
     /* recursive W locks are allowed at the inline level */
-    if ((l->RW.Owner == MQ_TSA) || MQ_R_HaveLock_p(l)) {
+    if ((l->RW.InPieces.Owner == MQ_TSA) || MQ_R_HaveLock_p(l)) {
       ret = MQ_seterrpoint_or_abort(EDEADLK,l->Flags & MQ_RWLOCK_ABORTONEDEADLK);
       goto out;
     }
 
     if (! rwcount_at_entry) {
       MQ_RWLOCK_W_UP(l);
-      l->RW.Owner = MQ_TSA;
+      l->RW.InPieces.Owner = MQ_TSA;
       return _MQ_RWLock_MutEx_Unlock(l);
     }
 
@@ -3054,7 +3055,7 @@ __wur int _MQ_Cond_Wait(MQ_RWLock_t *cond, MQ_Time_t maxwait, void **arg, uint64
     MQ_SyncInt_Increment(cond->C_Reqs,1);
 
   int64_t LFList_ID;
-  if (cond->MutEx.Owner == MQ_TSA)
+  if (cond->MutEx.InPieces.Owner == MQ_TSA)
     LFList_ID = 0;
   else {
     if (cond->Flags & MQ_RWLOCK_INHERITPRIORITY) {
@@ -3091,7 +3092,7 @@ __wur int _MQ_Cond_Wait(MQ_RWLock_t *cond, MQ_Time_t maxwait, void **arg, uint64
     } else
       what = MQ_COND_WAIT_MUTEX;
   } else if (MQ_RWLOCK_W_COUNT(cond) > 0) {
-    if (cond->RW.Owner != MQ_TSA) {
+    if (cond->RW.InPieces.Owner != MQ_TSA) {
       ret = MQ_seterrpoint_or_abort(EPERM,cond->Flags & MQ_RWLOCK_ABORTONMISUSE);
       goto errout;
     }
@@ -3233,7 +3234,7 @@ __wur int MQ_RWLock_Cur_Waiter_Count(MQ_RWLock_t *l, MQ_Wait_Type which) {
   }
 
   if (! which)
-    ret = (int64_t)(l->Wait_List_Length + (int)l->MutEx.Count) - 1; /* don't bother with SyncInt_Get on MutEx --
+    ret = (int64_t)(l->Wait_List_Length + (int)l->MutEx.InPieces.Count) - 1; /* don't bother with SyncInt_Get on MutEx --
 								 * it's no staler than the value established in the
 								 * _MutEx_Lock immediately above.
 								 */

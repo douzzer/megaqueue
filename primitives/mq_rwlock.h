@@ -39,7 +39,7 @@ struct MQ_Lock_Wait_Ent;
 
 #define MQ_RWLOCK_MAX_TRACKED 32
 
-union MQ_LockCore {
+union __attribute__((packed,aligned(8))) MQ_LockCore {
   uint64_t EnBloc;
   struct {
 #define MQ_RWLOCK_COUNT_INITIALIZER 0xffff0000U /* -0x40000000 */
@@ -47,7 +47,7 @@ union MQ_LockCore {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
     int32_t Owner;
     uint32_t Count;
-#define MQ_LockCore_MkEnBloc(owner,count) ((((uint64_t)(owner))<<32UL) | ((uint64_t)(count)))
+#define MQ_LockCore_MkEnBloc(owner,count) ((((uint64_t)(count))<<32UL) | ((uint64_t)(uint32_t)(owner)))
 #define MQ_RWLOCK_COUNT_MASK (0xffffffffUL<<32UL)
 #define MQ_RWLOCK_COUNT_TO_ENBLOC(x) ((uint64_t)(x)<<32UL)
 #define MQ_MUTEX_CORE_INITIALIZER (((uint64_t)((uint32_t)MQ_TSA_INVALIDOWNER))|(((uint64_t)MQ_RWLOCK_COUNT_INITIALIZER<<32UL)))
@@ -55,16 +55,15 @@ union MQ_LockCore {
 #else
     uint32_t Count;
     int32_t Owner;
-#define MQ_LockCore_MkEnBloc(owner,count) ((((uint64_t)(count))<<32UL) | ((uint64_t)(owner)))
+#define MQ_LockCore_MkEnBloc(owner,count) ((((uint64_t)(uint32_t)(owner))<<32UL) | ((uint64_t)(count)))
 #define MQ_RWLOCK_COUNT_MASK 0xffffffffUL
 #define MQ_RWLOCK_COUNT_TO_ENBLOC(x) ((uint64_t)(x))
-#define MQ_MUTEX_CORE_INITIALIZER ((((uint64_t)MQ_TSA_INVALIDOWNER)<<32UL)|(uint64_t)MQ_RWLOCK_COUNT_INITIALIZER)
-#define MQ_RWLOCK_CORE_INITIALIZER ((((uint64_t)MQ_TSA_INVALIDOWNER)<<32UL)|(uint64_t)MQ_RWLOCK_COUNT_CONTENDED)
+#define MQ_MUTEX_CORE_INITIALIZER ((((uint64_t)(uint32_t)MQ_TSA_INVALIDOWNER)<<32UL)|(uint64_t)MQ_RWLOCK_COUNT_INITIALIZER)
+#define MQ_RWLOCK_CORE_INITIALIZER ((((uint64_t)(uint32_t)MQ_TSA_INVALIDOWNER)<<32UL)|(uint64_t)MQ_RWLOCK_COUNT_CONTENDED)
 #endif
-  };
+  } InPieces;
 };
 
-typedef struct MQ_RWLock {
 #define MQ_RWLOCK_RECURSION (1UL<<0) /* allow one TID to hold multiple mutex or write locks on a single lock */
 #define MQ_RWLOCK_ADAPTIVE (1UL<<1) /* Kaz Kylheku's algorithm for opportunistic dynamically tuned spin mutex acquisition in lieu of FUTEX_WAIT */
 #define MQ_RWLOCK_READOPTIMAL (1UL<<2) /* TODO -- obtain uncontended concurrent read locks thread-locally, while write lockers have to walk the thread list, inspired by Pedro Ramalhete at concurrencyfreaks.blogspot.com */
@@ -80,7 +79,7 @@ typedef struct MQ_RWLock {
 #define MQ_RWLOCK_REPORTINVERSIONS (1UL<<12) /* TODO -- detect and report out of order lock access (print to stderr) */
 #define MQ_RWLOCK_AVERTINVERSIONS (1UL<<13) /* TODO -- detect and prevent out of order lock access (return EDEADLK) */
 #define MQ_RWLOCK_ABORTWHENCORRUPTED (1UL<<14) /* rather than ENOTRECOVERABLE, SIGABRT preserving the stack(s) at the point of discovery */
-#define MQ_RWLOCK_INTELRTM (1UL<<15) /* use Intel Restricted Transactional Memory in uncontended scenarios */
+#define MQ_RWLOCK_INTELRTM (1UL<<15) /* UNTESTED -- use Intel Restricted Transactional Memory in uncontended scenarios */
 #define MQ_RWLOCK_NOLOCKTRACKING (1UL<<16) /* very fast, but incompatible with _INHERIT*PRIORITY, _*INVERSIONS, and _INTELRTM, and makes MQ_R_HaveLock_p() always false */
 #define MQ_RWLOCK_ABORTONMISUSE (1UL<<17) /* abort instead of returning EINVAL, EPERM, ENOLCK, or ENOTSUP, or EBUSY in MQ_RWLock_Destroy() (preserve stack at point of detection) */
 #define MQ_RWLOCK_ABORTONEDEADLK (1UL<<18) /* abort instead of returning EDEADLK (preserve stack at point of detection) */
@@ -92,74 +91,6 @@ typedef struct MQ_RWLock {
 #define MQ_RWLOCK_INACTIVE (1UL<<62) /* lock inactive -- lock attempts will produce ECANCELED until the inactivater reactivates the lock */
 #define MQ_RWLOCK_INITED (1UL<<63) /* try to track if lock is initialized */
 #define MQ_RWLOCK_DEFAULTFLAGS (~0UL) /* never makes sense to pass in the internal flags, so this works fine. */
-  volatile uint64_t Flags;
-  const uint64_t *BuildFlags;
-
-  volatile uint64_t ID;
-
-  volatile union __MQ_SchedState SchedState; /* an elevated priority, if any, associated with this lock and its holder(s), to be relinquished by each holder (and
-					      * if applicable transferred to the new holder(s)) at unlock time
-					      */
-
-  volatile union MQ_LockCore MutEx;
-  struct MQ_Lock_LFList_Ent * volatile LFList_Head, * volatile LFList_Tail;
-  volatile pid_t LFList_Head_Waiter, LFList_Tail_Waiter;
-  volatile MQ_TSA_t LFList_Head_Lock;
-  volatile int MutEx_Spin_Estimator; /* for MQ_RWLOCK_ADAPTIVE */
-  volatile int MutEx_Recursion_Depth; /* for MQ_RWLOCK_RECURSION */
-
-#define MQ_RWLOCK_COUNT_CONTENDED (1U<<31)
-#define MQ_RWLOCK_COUNT_READ (1U<<30)
-#define MQ_RWLOCK_COUNT_MINFLAG (1U<<30)
-  volatile union MQ_LockCore RW;
-  struct MQ_Lock_Wait_Ent * volatile Wait_List_Head, * volatile Wait_List_Tail;
-  volatile int Wait_List_Length;
-  volatile int Shared_Futex_Granted, Shared_Futex_RefCount;
-
-#if defined(MQ_RWLOCK_STATISTICS_SUPPORT) || defined(MQ_RWLOCK_DEBUGGING_SUPPORT)
-
-  volatile uint64_t futex_trips;
-  volatile uint64_t M_Reqs, M_Adaptives, M_Waits, M_Fails, R_Reqs, R_Waits, R_Fails, W_Reqs, W_Waits, W_Fails, R2W_Reqs, R2W_Waits, R2W_Fails, C_Reqs, C_Fails, S_Reqs, S_Misses, S_Fails;
-  double M_Wait_Time_Cum, R_Wait_Time_Cum, W_Wait_Time_Cum, R2W_Wait_Time_Cum;
-  struct MQ_RWLock * volatile by_thread_prev, * volatile by_thread_next, * volatile by_lockinst_prev, * volatile by_lockinst_next;
-  const char *init_file;
-  int init_line;
-  const char *init_function;
-  const char *last_M_Locker_file;
-  int last_M_Locker_line;
-  const char *last_M_Locker_function;
-  pid_t last_M_Locker_tid;
-  const char *last_M_Unlocker_file;
-  int last_M_Unlocker_line;
-  const char *last_M_Unlocker_function;
-  pid_t last_M_Unlocker_tid;
-  const char *last_W_Locker_file;
-  int last_W_Locker_line;
-  const char *last_W_Locker_function;
-  pid_t last_W_Locker_tid;
-  const char *last_W_Unlocker_file;
-  int last_W_Unlocker_line;
-  const char *last_W_Unlocker_function;
-  pid_t last_W_Unlocker_tid;
-  const char *last_fresh_R_Locker_file;
-  int last_fresh_R_Locker_line;
-  const char *last_fresh_R_Locker_function;
-  pid_t last_fresh_R_Locker_tid;
-  const char *last_R_Locker_file;
-  int last_R_Locker_line;
-  const char *last_R_Locker_function;
-  pid_t last_R_Locker_tid;
-  const char *last_R_Unlocker_file;
-  int last_R_Unlocker_line;
-  const char *last_R_Unlocker_function;
-  pid_t last_R_Unlocker_tid;
-
-#endif
-
-} MQ_RWLock_t;
-
-extern int _MQ_RWLock_LockState_Initialize(MQ_RWLock_t *l);
-extern __constfunc void _MQ_RWLock_LockState_Extricate(MQ_RWLock_t *l);
 
 extern volatile uint64_t __MQ_RWLock_GlobalDefaultFlags;
 
@@ -312,11 +243,179 @@ static const uint64_t __MQ_RWLock_LocalBuildFlags = MQ_RWLOCK_LOCALBUILDFLAGS;
 //#define __MQ_RWLock_LocalBuildCapMask ((((MQ_RWLOCK_MAXUSERFLAG<<1)-1UL) & ~MQ_RWLOCK_SUPPORTNEEDED_FLAGS) | __MQ_RWLock_LocalBuildFlags)
 #define __MQ_RWLock_LocalBuildCapMask ((((MQ_RWLOCK_MAXUSERFLAG<<1)-1UL) & ~MQ_RWLOCK_SUPPORTNEEDED_FLAGS) | MQ_RWLOCK_LOCALBUILDFLAGS)
 
+#ifndef __cplusplus
 #ifdef MQ_RWLOCK_DEBUGGING_SUPPORT
 #  define MQ_RWLOCK_INITIALIZER(flags) { .ID = 0, .MutEx.EnBloc = MQ_MUTEX_CORE_INITIALIZER, .MutEx_Recursion_Depth = 0, .MutEx_Spin_Estimator = MQ_RWLOCK_ADAPTIVE_INIT_SPINS, .RW.EnBloc = MQ_RWLOCK_CORE_INITIALIZER, .LFList_Head = 0, .LFList_Tail = 0, .LFList_Head_Waiter = 0, .LFList_Tail_Waiter = 0, .LFList_Head_Lock = 0, .Wait_List_Head = 0, .Wait_List_Tail = 0, .Wait_List_Length = 0, .Flags = MQ_RWLOCK_INITED|(((flags) == MQ_RWLOCK_DEFAULTFLAGS) ? (MQ_RWLOCK_LOCALDEFAULTFLAGS /* |(__MQ_RWLock_GlobalDefaultFlags&__MQ_RWLock_LocalBuildCapMask) */) : ((flags)&__MQ_RWLock_LocalBuildCapMask)), .BuildFlags = &__MQ_RWLock_LocalBuildFlags, .Shared_Futex_Granted = 0, .Shared_Futex_RefCount = 0, .init_file = __FILE__, .init_line = __LINE__, .init_function = __FUNCTION__ }
 #else
 #  define MQ_RWLOCK_INITIALIZER(flags) { .ID = 0, .MutEx.EnBloc = MQ_MUTEX_CORE_INITIALIZER, .MutEx_Recursion_Depth = 0, .MutEx_Spin_Estimator = MQ_RWLOCK_ADAPTIVE_INIT_SPINS, .RW.EnBloc = MQ_RWLOCK_CORE_INITIALIZER, .LFList_Head = 0, .LFList_Tail = 0, .LFList_Head_Waiter = 0, .LFList_Tail_Waiter = 0, .LFList_Head_Lock = 0, .Wait_List_Head = 0, .Wait_List_Tail = 0, .Wait_List_Length = 0, .Flags = MQ_RWLOCK_INITED|(((flags) == MQ_RWLOCK_DEFAULTFLAGS) ? (MQ_RWLOCK_LOCALDEFAULTFLAGS /* |(__MQ_RWLock_GlobalDefaultFlags&__MQ_RWLock_LocalBuildCapMask) */) : ((flags)&__MQ_RWLock_LocalBuildCapMask)), .BuildFlags = &__MQ_RWLock_LocalBuildFlags, .Shared_Futex_Granted = 0, .Shared_Futex_RefCount = 0 }
 #endif
+#endif
+
+typedef struct MQ_RWLock {
+  volatile uint64_t Flags;
+  const uint64_t *BuildFlags;
+
+  volatile uint64_t ID;
+
+  volatile union __MQ_SchedState SchedState; /* an elevated priority, if any, associated with this lock and its holder(s), to be relinquished by each holder (and
+					      * if applicable transferred to the new holder(s)) at unlock time
+					      */
+
+  volatile union MQ_LockCore MutEx;
+  struct MQ_Lock_LFList_Ent * volatile LFList_Head, * volatile LFList_Tail;
+  volatile pid_t LFList_Head_Waiter, LFList_Tail_Waiter;
+  volatile MQ_TSA_t LFList_Head_Lock;
+  volatile int MutEx_Spin_Estimator; /* for MQ_RWLOCK_ADAPTIVE */
+  volatile int MutEx_Recursion_Depth; /* for MQ_RWLOCK_RECURSION */
+
+#define MQ_RWLOCK_COUNT_CONTENDED (1U<<31)
+#define MQ_RWLOCK_COUNT_READ (1U<<30)
+#define MQ_RWLOCK_COUNT_MINFLAG (1U<<30)
+  volatile union MQ_LockCore RW;
+  struct MQ_Lock_Wait_Ent * volatile Wait_List_Head, * volatile Wait_List_Tail;
+  volatile int Wait_List_Length;
+  volatile int Shared_Futex_Granted, Shared_Futex_RefCount;
+
+#if defined(MQ_RWLOCK_STATISTICS_SUPPORT) || defined(MQ_RWLOCK_DEBUGGING_SUPPORT)
+
+  volatile uint64_t futex_trips;
+  volatile uint64_t M_Reqs, M_Adaptives, M_Waits, M_Fails, R_Reqs, R_Waits, R_Fails, W_Reqs, W_Waits, W_Fails, R2W_Reqs, R2W_Waits, R2W_Fails, C_Reqs, C_Fails, S_Reqs, S_Misses, S_Fails;
+  double M_Wait_Time_Cum, R_Wait_Time_Cum, W_Wait_Time_Cum, R2W_Wait_Time_Cum;
+  struct MQ_RWLock * volatile by_thread_prev, * volatile by_thread_next, * volatile by_lockinst_prev, * volatile by_lockinst_next;
+  const char *init_file;
+  int init_line;
+  const char *init_function;
+  const char *last_M_Locker_file;
+  int last_M_Locker_line;
+  const char *last_M_Locker_function;
+  pid_t last_M_Locker_tid;
+  const char *last_M_Unlocker_file;
+  int last_M_Unlocker_line;
+  const char *last_M_Unlocker_function;
+  pid_t last_M_Unlocker_tid;
+  const char *last_W_Locker_file;
+  int last_W_Locker_line;
+  const char *last_W_Locker_function;
+  pid_t last_W_Locker_tid;
+  const char *last_W_Unlocker_file;
+  int last_W_Unlocker_line;
+  const char *last_W_Unlocker_function;
+  pid_t last_W_Unlocker_tid;
+  const char *last_fresh_R_Locker_file;
+  int last_fresh_R_Locker_line;
+  const char *last_fresh_R_Locker_function;
+  pid_t last_fresh_R_Locker_tid;
+  const char *last_R_Locker_file;
+  int last_R_Locker_line;
+  const char *last_R_Locker_function;
+  pid_t last_R_Locker_tid;
+  const char *last_R_Unlocker_file;
+  int last_R_Unlocker_line;
+  const char *last_R_Unlocker_function;
+  pid_t last_R_Unlocker_tid;
+
+#endif
+
+#ifdef __cplusplus
+
+#define MQ_RWLOCK_INITIALIZER(flags...) (__FILE__, __LINE__, __FUNCTION__, ## flags)
+#if defined(MQ_RWLOCK_DEBUGGING_SUPPORT) || defined(MQ_RWLOCK_STATISTICS_SUPPORT)
+  MQ_RWLock(const char *file, int line, const char *func, uint64_t flags = MQ_RWLOCK_DEFAULTFLAGS)
+#else
+  MQ_RWLock(__unusedattr const char *file, __unusedattr int line, __unusedattr const char *func, uint64_t flags = MQ_RWLOCK_DEFAULTFLAGS)
+#endif
+  {
+#if defined(MQ_RWLOCK_DEBUGGING_SUPPORT) || defined(MQ_RWLOCK_STATISTICS_SUPPORT)
+    init_file = file;
+    init_line = line;
+    init_function = func;
+#endif
+    ID = 0;
+    MutEx.EnBloc = MQ_MUTEX_CORE_INITIALIZER;
+    MutEx_Recursion_Depth = 0;
+    MutEx_Spin_Estimator = MQ_RWLOCK_ADAPTIVE_INIT_SPINS;
+    RW.EnBloc = MQ_RWLOCK_CORE_INITIALIZER;
+    LFList_Head = 0;
+    LFList_Tail = 0;
+    LFList_Head_Waiter = 0;
+    LFList_Tail_Waiter = 0;
+    LFList_Head_Lock = 0;
+    Wait_List_Head = 0;
+    Wait_List_Tail = 0;
+    Wait_List_Length = 0;
+    Flags = MQ_RWLOCK_INITED|(((flags) == MQ_RWLOCK_DEFAULTFLAGS) ? (MQ_RWLOCK_LOCALDEFAULTFLAGS /* |(__MQ_RWLock_GlobalDefaultFlags&__MQ_RWLock_LocalBuildCapMask) */) : ((flags)&__MQ_RWLock_LocalBuildCapMask));
+    BuildFlags = &__MQ_RWLock_LocalBuildFlags;
+    Shared_Futex_Granted = 0;
+    Shared_Futex_RefCount = 0;
+#if defined(MQ_RWLOCK_STATISTICS_SUPPORT) || defined(MQ_RWLOCK_DEBUGGING_SUPPORT)
+    futex_trips = 0;
+    M_Reqs = 0;
+    M_Adaptives = 0;
+    M_Waits = 0;
+    M_Fails = 0;
+    R_Reqs = 0;
+    R_Waits = 0;
+    R_Fails = 0;
+    W_Reqs = 0;
+    W_Waits = 0;
+    W_Fails = 0;
+    R2W_Reqs = 0;
+    R2W_Waits = 0;
+    R2W_Fails = 0;
+    C_Reqs = 0;
+    C_Fails = 0;
+    S_Reqs = 0;
+    S_Misses = 0;
+    S_Fails = 0;
+    M_Wait_Time_Cum = 0;
+    R_Wait_Time_Cum = 0;
+    W_Wait_Time_Cum = 0;
+    R2W_Wait_Time_Cum = 0;
+    by_thread_prev = 0;
+    by_thread_next = 0;
+    by_lockinst_prev = 0;
+    by_lockinst_next = 0;
+    last_M_Locker_file = 0;
+    last_M_Locker_line = 0;
+    last_M_Locker_function = 0;
+    last_M_Locker_tid = 0;
+    last_M_Unlocker_file = 0;
+    last_M_Unlocker_line = 0;
+    last_M_Unlocker_function = 0;
+    last_M_Unlocker_tid = 0;
+    last_W_Locker_file = 0;
+    last_W_Locker_line = 0;
+    last_W_Locker_function = 0;
+    last_W_Locker_tid = 0;
+    last_W_Unlocker_file = 0;
+    last_W_Unlocker_line = 0;
+    last_W_Unlocker_function = 0;
+    last_W_Unlocker_tid = 0;
+    last_fresh_R_Locker_file = 0;
+    last_fresh_R_Locker_line = 0;
+    last_fresh_R_Locker_function = 0;
+    last_fresh_R_Locker_tid = 0;
+    last_R_Locker_file = 0;
+    last_R_Locker_line = 0;
+    last_R_Locker_function = 0;
+    last_R_Locker_tid = 0;
+    last_R_Unlocker_file = 0;
+    last_R_Unlocker_line = 0;
+    last_R_Unlocker_function = 0;
+    last_R_Unlocker_tid = 0;
+#endif
+  }
+
+#endif /* __cplusplus */
+
+} MQ_RWLock_t;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern int _MQ_RWLock_LockState_Initialize(MQ_RWLock_t *l);
+extern __constfunc void _MQ_RWLock_LockState_Extricate(MQ_RWLock_t *l);
 
 #ifdef MQ_RWLOCK_INLINE
 #define _MQ_RWLOCK_MAYBE_INLINE static __always_inline
@@ -428,15 +527,15 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_Unlock(MQ_RWLock_t *l);
 extern __wur int _MQ_Cond_Wait(MQ_RWLock_t *cond, MQ_Time_t maxwait, void **arg, uint64_t flags, const char *file, const int line, const char *func);
 extern int _MQ_Cond_Signal(MQ_RWLock_t *l, int maxtowake, void *arg, uint64_t flags, const char *file, const int line, const char *func);
 
-#define MQ_RWLOCK_R_COUNT(l) (((l)->RW.Count&MQ_RWLOCK_COUNT_READ) ? ((l)->RW.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)) : 0)
-#define MQ_RWLOCK_W_COUNT(l) (((l)->RW.Count&MQ_RWLOCK_COUNT_READ) ? 0 : ((l)->RW.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)))
-#define MQ_RWLOCK_R_LOCKED_P(l) ((l)->RW.Count & MQ_RWLOCK_COUNT_READ)
-#define MQ_RWLOCK_W_LOCKED_P(l) (((! (l)->RW.Count) & MQ_RWLOCK_COUNT_READ) && ((l)->RW.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)))
-#define MQ_RWLOCK_R_NOTLOCKED_P(l) (! ((l)->RW.Count & MQ_RWLOCK_COUNT_READ))
-#define MQ_RWLOCK_W_NOTLOCKED_P(l) ((! ((l)->RW.Count & (MQ_RWLOCK_COUNT_MINFLAG-1))) || (((l)->RW.Count) & MQ_RWLOCK_COUNT_READ))
-#define MQ_RWLOCK_RW_LOCKED_P(l) ((l)->RW.Count & (MQ_RWLOCK_COUNT_MINFLAG-1))
-#define MQ_RWLOCK_RW_RAWCOUNT(l) ((l)->RW.Count) /* used as an lvalue */
-#define MQ_RWLOCK_RW_COUNT(l) ((l)->RW.Count & (MQ_RWLOCK_COUNT_MINFLAG-1))
+#define MQ_RWLOCK_R_COUNT(l) (((l)->RW.InPieces.Count&MQ_RWLOCK_COUNT_READ) ? ((l)->RW.InPieces.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)) : 0)
+#define MQ_RWLOCK_W_COUNT(l) (((l)->RW.InPieces.Count&MQ_RWLOCK_COUNT_READ) ? 0 : ((l)->RW.InPieces.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)))
+#define MQ_RWLOCK_R_LOCKED_P(l) ((l)->RW.InPieces.Count & MQ_RWLOCK_COUNT_READ)
+#define MQ_RWLOCK_W_LOCKED_P(l) (((! (l)->RW.InPieces.Count) & MQ_RWLOCK_COUNT_READ) && ((l)->RW.InPieces.Count & (MQ_RWLOCK_COUNT_MINFLAG-1)))
+#define MQ_RWLOCK_R_NOTLOCKED_P(l) (! ((l)->RW.InPieces.Count & MQ_RWLOCK_COUNT_READ))
+#define MQ_RWLOCK_W_NOTLOCKED_P(l) ((! ((l)->RW.InPieces.Count & (MQ_RWLOCK_COUNT_MINFLAG-1))) || (((l)->RW.InPieces.Count) & MQ_RWLOCK_COUNT_READ))
+#define MQ_RWLOCK_RW_LOCKED_P(l) ((l)->RW.InPieces.Count & (MQ_RWLOCK_COUNT_MINFLAG-1))
+#define MQ_RWLOCK_RW_RAWCOUNT(l) ((l)->RW.InPieces.Count) /* used as an lvalue */
+#define MQ_RWLOCK_RW_COUNT(l) ((l)->RW.InPieces.Count & (MQ_RWLOCK_COUNT_MINFLAG-1))
 #define MQ_RWLOCK_RW_RAWTOCOUNT(x) ((x) & (MQ_RWLOCK_COUNT_MINFLAG-1))
 
 #ifndef MQ_RWLOCK_NOLOCKTRACKING_SUPPORT
@@ -489,9 +588,9 @@ extern int MQ_SchedState_ReleasePeak(void);
 #endif
 
 #if defined(MQ_RWLOCK_INTELRTM_SUPPORT) && defined(__RTM__)
-#define MQ_RWLock_HaveMutex(l) (((l)->MutEx.Owner == MQ_TSA_AUTOINIT) || _MQ_RWLock_LockHeld_p(l,MQ_RWLOCK_TRACK_MUTEX))
+#define MQ_RWLock_HaveMutex(l) (((l)->MutEx.InPieces.Owner == MQ_TSA_AUTOINIT) || _MQ_RWLock_LockHeld_p(l,MQ_RWLOCK_TRACK_MUTEX))
 #else
-#define MQ_RWLock_HaveMutex(l) ((l)->MutEx.Owner == MQ_TSA_AUTOINIT)
+#define MQ_RWLock_HaveMutex(l) ((l)->MutEx.InPieces.Owner == MQ_TSA_AUTOINIT)
 #endif
 
 extern int _MQ_X_AddLock(MQ_RWLock_t *l, uint64_t locktype);
@@ -508,37 +607,41 @@ extern void _MQ_RWLock_ThreadCleanup(void);
 #define _MQ_Mutex_AddLock(l) _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_MUTEX)
 #define _MQ_Mutex_DropLock(l) _MQ_X_DropLock(l,MQ_RWLOCK_TRACK_MUTEX)
 
-#define MQ_Mutex_BequeathLock(l) (_MQ_RWLock_AbortRTM4Handoff(),(MQ_SyncInt_ExchangeIfEq((l)->MutEx.Owner, MQ_TSA, MQ_TSA_BEQUEATHED_VALUE) ? _MQ_X_DropLock(l,MQ_RWLOCK_TRACK_MUTEX) : ((! MQ_TSA_ValidP((l)->MutEx.Owner)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))))
+#define MQ_Mutex_BequeathLock(l) (_MQ_RWLock_AbortRTM4Handoff(),(MQ_SyncInt_ExchangeIfEq((l)->MutEx.InPieces.Owner, MQ_TSA, MQ_TSA_BEQUEATHED_VALUE) ? _MQ_X_DropLock(l,MQ_RWLOCK_TRACK_MUTEX) : ((! MQ_TSA_ValidP((l)->MutEx.InPieces.Owner)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))))
 
-#define MQ_Mutex_InheritLock(l) (_MQ_RWLock_AbortRTM4Handoff(),MQ_SyncInt_ExchangeIfEq((l)->MutEx.Owner, MQ_TSA_BEQUEATHED_VALUE, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_MUTEX) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))
+#define MQ_Mutex_InheritLock(l) (_MQ_RWLock_AbortRTM4Handoff(),MQ_SyncInt_ExchangeIfEq((l)->MutEx.InPieces.Owner, MQ_TSA_BEQUEATHED_VALUE, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_MUTEX) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))
 
-#define MQ_Mutex_SeizeLock(l) ({_MQ_RWLock_AbortRTM4Handoff(); __typeof__((l)->MutEx.Owner) MutEx_Locker_now = MQ_SyncInt_Get((l)->MutEx.Owner); (! MQ_TSA_ValidP(MutEx_Locker_now)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (MQ_SyncInt_ExchangeIfEq((l)->RW.Owner, W_Locker_now, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_MUTEX) : MQ_seterrpoint(EAGAIN));})
+#define MQ_Mutex_SeizeLock(l) ({_MQ_RWLock_AbortRTM4Handoff(); __typeof__((l)->MutEx.InPieces.Owner) MutEx_Locker_now = MQ_SyncInt_Get((l)->MutEx.InPieces.Owner); (! MQ_TSA_ValidP(MutEx_Locker_now)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (MQ_SyncInt_ExchangeIfEq((l)->RW.InPieces.Owner, W_Locker_now, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_MUTEX) : MQ_seterrpoint(EAGAIN));})
 
 #define MQ_R_HaveLock_p(l) _MQ_RWLock_LockHeld_p(l,MQ_RWLOCK_TRACK_READ)
 
 #if defined(MQ_RWLOCK_INTELRTM_SUPPORT) && defined(__RTM__)
-#define MQ_W_HaveLock_p(l) (((l)->RW.Owner == MQ_TSA_AUTOINIT) || _MQ_RWLock_LockHeld_p(l,MQ_RWLOCK_TRACK_WRITE))
+#define MQ_W_HaveLock_p(l) (((l)->RW.InPieces.Owner == MQ_TSA_AUTOINIT) || _MQ_RWLock_LockHeld_p(l,MQ_RWLOCK_TRACK_WRITE))
 #else
-#define MQ_W_HaveLock_p(l) ((l)->RW.Owner == MQ_TSA_AUTOINIT)
+#define MQ_W_HaveLock_p(l) ((l)->RW.InPieces.Owner == MQ_TSA_AUTOINIT)
 #endif
 
 #define MQ_RWLock_IsActive(l) (! ((l)->Flags & MQ_RWLOCK_INACTIVE))
 #define MQ_RWLock_SetInactive(l) ({int64_t mutexret = MQ_Mutex_Lock(l,MQ_NOWAITING); (mutexret>=0) ? (MQ_SyncInt_ExchangeIfEq(MQ_RWLOCK_RW_RAWCOUNT(l),0UL,MQ_RWLOCK_COUNT_CONTENDED) ? (MQ_SyncInt_SetFlags((l)->Flags,MQ_RWLOCK_INACTIVE), 0) : (MQ_Mutex_Unlock(l), MQ_seterrpoint(EBUSY))) : mutexret; })
-#define MQ_RWLock_SetActive(l) (((l)->MutEx.Owner != MQ_TSA_AUTOINIT) ? MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (! ((l)->Flags & MQ_RWLOCK_INACTIVE)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (MQ_SyncInt_ClearFlags((l)->Flags,MQ_RWLOCK_INACTIVE), MQ_Mutex_Unlock(l)))
+#define MQ_RWLock_SetActive(l) (((l)->MutEx.InPieces.Owner != MQ_TSA_AUTOINIT) ? MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (! ((l)->Flags & MQ_RWLOCK_INACTIVE)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (MQ_SyncInt_ClearFlags((l)->Flags,MQ_RWLOCK_INACTIVE), MQ_Mutex_Unlock(l)))
 
-#define MQ_RWLock_Cur_Waiter_Count_Unlocked(l) (((l)->MutEx.Count ? (int)(l)->MutEx.Count - 1 : 0) + (l)->Wait_List_Length)
+#define MQ_RWLock_Cur_Waiter_Count_Unlocked(l) (((l)->MutEx.InPieces.Count ? (int)(l)->MutEx.InPieces.Count - 1 : 0) + (l)->Wait_List_Length)
 __wur int MQ_RWLock_Cur_Waiter_Count(MQ_RWLock_t *l, MQ_Wait_Type which);
 
 #define _MQ_W_AddLock(l) _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_WRITE)
 #define _MQ_W_DropLock(l) _MQ_X_DropLock(l,MQ_RWLOCK_TRACK_WRITE)
-#define MQ_W_BequeathLock(l) (_MQ_RWLock_AbortRTM4Handoff(),(MQ_SyncInt_ExchangeIfEq((l)->RW.Owner, MQ_TSA, MQ_TSA_BEQUEATHED_VALUE) ? _MQ_X_DropLock(l,MQ_RWLOCK_TRACK_WRITE) : ((! MQ_TSA_ValidP((l)->RW.Owner)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))))
-#define MQ_W_InheritLock(l) (MQ_SyncInt_ExchangeIfEq((l)->RW.Owner, MQ_TSA_BEQUEATHED_VALUE, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_WRITE) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))
+#define MQ_W_BequeathLock(l) (_MQ_RWLock_AbortRTM4Handoff(),(MQ_SyncInt_ExchangeIfEq((l)->RW.InPieces.Owner, MQ_TSA, MQ_TSA_BEQUEATHED_VALUE) ? _MQ_X_DropLock(l,MQ_RWLOCK_TRACK_WRITE) : ((! MQ_TSA_ValidP((l)->RW.InPieces.Owner)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))))
+#define MQ_W_InheritLock(l) (MQ_SyncInt_ExchangeIfEq((l)->RW.InPieces.Owner, MQ_TSA_BEQUEATHED_VALUE, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_WRITE) : MQ_seterrpoint_or_abort(EPERM,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE))
 
-#define MQ_W_SeizeLock(l) ({__typeof__((l)->RW.Owner) W_Locker_now = MQ_SyncInt_Get((l)->RW.Owner); (! MQ_TSA_ValidP(W_Locker_now)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (MQ_SyncInt_ExchangeIfEq((l)->RW.Owner, W_Locker_now, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_WRITE) : MQ_seterrpoint(EAGAIN));})
+#define MQ_W_SeizeLock(l) ({__typeof__((l)->RW.InPieces.Owner) W_Locker_now = MQ_SyncInt_Get((l)->RW.InPieces.Owner); (! MQ_TSA_ValidP(W_Locker_now)) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : (MQ_SyncInt_ExchangeIfEq((l)->RW.InPieces.Owner, W_Locker_now, MQ_TSA_AUTOINIT) ? _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_WRITE) : MQ_seterrpoint(EAGAIN));})
 
 #define _MQ_R_AddLock(l) _MQ_X_AddLock(l,MQ_RWLOCK_TRACK_READ)
 #define _MQ_R_DropLock(l) _MQ_X_DropLock(l,MQ_RWLOCK_TRACK_READ)
 #define MQ_R_BequeathLock(l) (MQ_RWLOCK_R_NOTLOCKED_P(l) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : ({int mq_r_bl_ret = _MQ_R_DropLock(l); (mq_r_bl_ret<0) ? mq_r_bl_ret : (MQ_SyncInt_Fence_Release(),mq_r_bl_ret);}))
 #define MQ_R_InheritLock(l) (MQ_SyncInt_Fence_Acquire(),MQ_RWLOCK_R_NOTLOCKED_P(l) ? MQ_seterrpoint_or_abort(EINVAL,(l)->Flags & MQ_RWLOCK_ABORTONMISUSE) : _MQ_R_AddLock(l))
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

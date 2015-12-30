@@ -19,6 +19,10 @@
 #ifndef MQ_RWLOCK_C
 #define MQ_RWLOCK_C
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef MQ_RWLOCK_INLINE
 #include "mq.h"
 #undef _MQ_RWLOCK_MAYBE_INLINE
@@ -57,11 +61,11 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_RWLock_Init(MQ_RWLock_t *l, uint64_t flags, int 
       memset(l,0,sizeof *l);
     l->Flags = MQ_RWLOCK_INITED|flags;
   }
-  l->MutEx.Count = MQ_RWLOCK_COUNT_INITIALIZER;
-  l->MutEx.Owner = MQ_TSA_INVALIDOWNER;
-  l->RW.Count = MQ_RWLOCK_COUNT_CONTENDED;
+  l->MutEx.InPieces.Count = MQ_RWLOCK_COUNT_INITIALIZER;
+  l->MutEx.InPieces.Owner = MQ_TSA_INVALIDOWNER;
+  l->RW.InPieces.Count = MQ_RWLOCK_COUNT_CONTENDED;
+  l->RW.InPieces.Owner = MQ_TSA_INVALIDOWNER;
   l->MutEx_Spin_Estimator = MQ_RWLOCK_ADAPTIVE_INIT_SPINS;
-  l->RW.Owner = MQ_TSA_INVALIDOWNER;
   l->BuildFlags = &__MQ_RWLock_LocalBuildFlags;
 #ifdef MQ_RWLOCK_DEBUGGING_SUPPORT
   if (l->Flags & MQ_RWLOCK_DEBUGGING) {
@@ -81,7 +85,7 @@ _MQ_RWLOCK_MAYBE_INLINE int MQ_RWLock_Destroy(MQ_RWLock_t *l) {
   if (! (l->Flags & MQ_RWLOCK_INITED))
     MQ_returnerrno_or_abort(EINVAL,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
   /* give verification of clean shutdown the good college try */
-  if ((l->MutEx.Count && (l->MutEx.Count != MQ_RWLOCK_COUNT_INITIALIZER)) ||
+  if ((l->MutEx.InPieces.Count && (l->MutEx.InPieces.Count != MQ_RWLOCK_COUNT_INITIALIZER)) ||
       MQ_RWLOCK_RW_LOCKED_P(l) ||
       l->Wait_List_Length)
     MQ_returnerrno_or_abort(EBUSY,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
@@ -155,7 +159,7 @@ __wur static __always_inline int64_t _MQ_RWLock_MutEx_Lock(MQ_RWLock_t *l, MQ_Ti
 #endif
 
 #ifdef MQ_RWLOCK_RECURSION_SUPPORT
-  if (l->MutEx.Owner == MQ_TSA) {
+  if (l->MutEx.InPieces.Owner == MQ_TSA) {
     MQ_SyncInt_Increment(l->MutEx_Recursion_Depth,1); /* atomic to stay async signal safe */
 #ifdef MQ_RWLOCK_STATISTICS_SUPPORT
     return ret;
@@ -181,12 +185,12 @@ __wur static __always_inline int64_t _MQ_RWLock_MutEx_Lock(MQ_RWLock_t *l, MQ_Ti
      code path.
   */
 
-  union MQ_LockCore end_core = { .Count = 1, .Owner = MQ_TSA };
-  union MQ_LockCore start_core = { .Count = 0, .Owner = l->MutEx.Owner };
+  union MQ_LockCore end_core = { .EnBloc = MQ_LockCore_MkEnBloc(MQ_TSA,1) };
+  union MQ_LockCore start_core = { .EnBloc = MQ_LockCore_MkEnBloc(l->MutEx.InPieces.Owner,0) };
   if (! MQ_SyncInt_ExchangeIfEq(l->MutEx.EnBloc,start_core.EnBloc,end_core.EnBloc)) {
     if (wait_nsecs && (*wait_nsecs <= 0)) {
 #ifdef MQ_RWLOCK_EXTRAERRORCHECKING_SUPPORT
-      MQ_returnerrno((l->MutEx.Owner == MQ_TSA) ? EDEADLK : EBUSY);
+      MQ_returnerrno((l->MutEx.InPieces.Owner == MQ_TSA) ? EDEADLK : EBUSY);
 #else
       MQ_returnerrno(EBUSY);
 #endif
@@ -216,8 +220,8 @@ static __always_inline int _MQ_RWLock_MutEx_Unlock(MQ_RWLock_t *l) {
 #endif
 
 #ifndef MQ_RWLOCK_NOCOSTLYERRORCHECKING_SUPPORT
-  if (l->MutEx.Owner != MQ_TSA) {
-    if (MQ_TSA_ValidP(l->MutEx.Owner))
+  if (l->MutEx.InPieces.Owner != MQ_TSA) {
+    if (MQ_TSA_ValidP(l->MutEx.InPieces.Owner))
       MQ_returnerrno_or_abort(EPERM,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
     else
       MQ_returnerrno_or_abort(EINVAL,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
@@ -272,7 +276,7 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int64_t _MQ_Mutex_Lock(MQ_RWLock_t *l, MQ_Time_t w
 #endif
 
 #ifdef MQ_RWLOCK_INTELRTM_SUPPORT
-  if ((! l->MutEx.Count) && (l->Flags & MQ_RWLOCK_INTELRTM) && (_MQ_MutEx_Lock_RTM(l) == 0))
+  if ((! l->MutEx.InPieces.Count) && (l->Flags & MQ_RWLOCK_INTELRTM) && (_MQ_MutEx_Lock_RTM(l) == 0))
     return 0; /* can't do _DEBUGGING as it would induce contention */
 #endif
 
@@ -285,7 +289,7 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int64_t _MQ_Mutex_Lock(MQ_RWLock_t *l, MQ_Time_t w
 #ifdef MQ_RWLOCK_INHERITPEAKPRIORITY_SUPPORT
   if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY)
 #ifdef MQ_RWLOCK_RECURSION_SUPPORT
-      && (l->MutEx.Owner != MQ_TSA)
+      && (l->MutEx.InPieces.Owner != MQ_TSA)
 #endif
       ) {
     if ((ret=_MQ_SchedState_Inherit(l))<0) {
@@ -418,7 +422,7 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_Mutex_Unlock(MQ_RWLock_t *l)
 #ifdef MQ_RWLOCK_INHERITPEAKPRIORITY_SUPPORT
   if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY)
 #ifdef MQ_RWLOCK_RECURSION_SUPPORT
-      && (l->MutEx.Owner != MQ_TSA)
+      && (l->MutEx.InPieces.Owner != MQ_TSA)
 #endif
       ) {
     int ret2;
@@ -444,7 +448,7 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int64_t _MQ_Mutex_Lock_Fast(MQ_RWLock_t *l, MQ_Tim
 #endif
 
 #ifdef MQ_RWLOCK_INTELRTM_SUPPORT
-  if ((! l->MutEx.Count) && (l->Flags & MQ_RWLOCK_INTELRTM) && (__MQ_RWLock_ThreadState.HeldLocks_Index != MQ_RWLOCK_MAX_TRACKED) && (_MQ_MutEx_Lock_RTM(l) == 0))
+  if ((! l->MutEx.InPieces.Count) && (l->Flags & MQ_RWLOCK_INTELRTM) && (__MQ_RWLock_ThreadState.HeldLocks_Index != MQ_RWLOCK_MAX_TRACKED) && (_MQ_MutEx_Lock_RTM(l) == 0))
     return 0; /* can't do _DEBUGGING as it would induce contention */
 #endif
 
@@ -526,7 +530,7 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_Mutex_Unlock_Fast(MQ_RWLock_t *l)
 
 /* the MQ RW lock and cond-signal facilities, layered on the foregoing mutex facility */
 
-#define MQ_RWLOCK_W_UP(l) (++(l)->RW.Count)
+#define MQ_RWLOCK_W_UP(l) (++(l)->RW.InPieces.Count)
 /* the rest of the RW.Count incr/decr macros are always unsafe outside the locked context of the contention handlers, so appear there, not here. */
 
 #ifdef __RTM__
@@ -578,7 +582,7 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int _MQ_W_Lock(MQ_RWLock_t *l, MQ_Time_t wait_nsec
 #ifdef MQ_RWLOCK_INHERITPEAKPRIORITY_SUPPORT
   if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY)
 #ifdef MQ_RWLOCK_RECURSION_SUPPORT
-      && (l->RW.Owner != MQ_TSA)
+      && (l->RW.InPieces.Owner != MQ_TSA)
 #endif
       ) {
     if ((ret=_MQ_SchedState_Inherit(l))<0) {
@@ -589,7 +593,7 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int _MQ_W_Lock(MQ_RWLock_t *l, MQ_Time_t wait_nsec
 #endif
 
 #if defined(MQ_RWLOCK_RECURSION_SUPPORT) || (! defined(MQ_RWLOCK_NOCOSTLYERRORCHECKING_SUPPORT))
-  if (l->RW.Owner == MQ_TSA) {
+  if (l->RW.InPieces.Owner == MQ_TSA) {
 #ifdef MQ_RWLOCK_RECURSION_SUPPORT
     if (l->Flags & MQ_RWLOCK_RECURSION) {
       MQ_RWLOCK_W_UP(l);
@@ -605,8 +609,8 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int _MQ_W_Lock(MQ_RWLock_t *l, MQ_Time_t wait_nsec
 
   {
     union MQ_LockCore start_core = { .EnBloc = l->RW.EnBloc };
-    if (! start_core.Count) {
-      union MQ_LockCore end_core = { .Count = 1, .Owner = MQ_TSA };
+    if (! start_core.InPieces.Count) {
+      union MQ_LockCore end_core = { .EnBloc = MQ_LockCore_MkEnBloc(MQ_TSA,1) };
       if (MQ_SyncInt_ExchangeIfEq_MaybeLock(l->RW.EnBloc,start_core.EnBloc,end_core.EnBloc))
 	goto successout;
     }
@@ -683,7 +687,7 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int _MQ_W2R_Lock(MQ_RWLock_t *l)
 #endif
 
 #ifndef MQ_RWLOCK_NOCOSTLYERRORCHECKING_SUPPORT
-  if (l->RW.Owner != MQ_TSA)
+  if (l->RW.InPieces.Owner != MQ_TSA)
     MQ_returnerrno_or_abort(EINVAL,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
 #endif
 
@@ -702,8 +706,8 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int _MQ_W2R_Lock(MQ_RWLock_t *l)
 
   {
     union MQ_LockCore start_core = { .EnBloc = l->RW.EnBloc };
-    if (start_core.Count == 1) {
-      union MQ_LockCore end_core = { .Count = (MQ_RWLOCK_COUNT_READ)|1U, .Owner = MQ_TSA_MkInvalid(MQ_TSA) };
+    if (start_core.InPieces.Count == 1) {
+      union MQ_LockCore end_core = { .EnBloc = MQ_LockCore_MkEnBloc(MQ_TSA_MkInvalid(MQ_TSA),(MQ_RWLOCK_COUNT_READ)|1U) };
       if (MQ_SyncInt_ExchangeIfEq_MaybeLock(l->RW.EnBloc,start_core.EnBloc,end_core.EnBloc))
 	goto successout;
     }
@@ -798,8 +802,8 @@ __wur _MQ_RWLOCK_MAYBE_INLINE int _MQ_R2W_Lock(MQ_RWLock_t *l, MQ_Time_t wait_ns
 
   {
     union MQ_LockCore start_core = { .EnBloc = l->RW.EnBloc };
-    if (start_core.Count == (MQ_RWLOCK_COUNT_READ|1U)) {
-      union MQ_LockCore end_core = { .Count = 1, .Owner = MQ_TSA };
+    if (start_core.InPieces.Count == (MQ_RWLOCK_COUNT_READ|1U)) {
+      union MQ_LockCore end_core = { .EnBloc = MQ_LockCore_MkEnBloc(MQ_TSA,1) };
       if (MQ_SyncInt_ExchangeIfEq_MaybeLock(l->RW.EnBloc,start_core.EnBloc,end_core.EnBloc)) {
 	ret = 0;
 	goto out;
@@ -878,7 +882,7 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_W_Unlock(MQ_RWLock_t *l)
 #endif
 
 #ifndef MQ_RWLOCK_NOCOSTLYERRORCHECKING_SUPPORT
-  if (l->RW.Owner != MQ_TSA)
+  if (l->RW.InPieces.Owner != MQ_TSA)
     MQ_returnerrno_or_abort(EINVAL,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
 #endif
 
@@ -903,11 +907,11 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_W_Unlock(MQ_RWLock_t *l)
 
   {
     union MQ_LockCore start_core = { .EnBloc = l->RW.EnBloc };
-    if (! (start_core.Count & MQ_RWLOCK_COUNT_CONTENDED)) {
+    if (! (start_core.InPieces.Count & MQ_RWLOCK_COUNT_CONTENDED)) {
 #ifdef MQ_RWLOCK_RECURSION_SUPPORT
-      union MQ_LockCore end_core = { .Count = start_core.Count - 1, .Owner = (start_core.Count == 1) ? MQ_TSA_MkInvalid(MQ_TSA) : MQ_TSA };
+      union MQ_LockCore end_core = { .EnBloc = MQ_LockCore_MkEnBloc((start_core.InPieces.Count == 1) ? MQ_TSA_MkInvalid(MQ_TSA) : MQ_TSA,start_core.InPieces.Count - 1) };
 #else
-      union MQ_LockCore end_core = { .Count = 0, .Owner = MQ_TSA_MkInvalid(MQ_TSA) };
+      union MQ_LockCore end_core = { .EnBloc = MQ_LockCore_MkEnBloc(MQ_TSA_MkInvalid(MQ_TSA),0) };
 #endif
       if (MQ_SyncInt_ExchangeIfEq_MaybeUnlock(l->RW.EnBloc,start_core.EnBloc,end_core.EnBloc))
 	goto successout;
@@ -935,7 +939,7 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_W_Unlock(MQ_RWLock_t *l)
 #ifdef MQ_RWLOCK_INHERITPEAKPRIORITY_SUPPORT
   if ((l->Flags & MQ_RWLOCK_INHERITPEAKPRIORITY)
 #ifdef MQ_RWLOCK_RECURSION_SUPPORT
-      && (l->RW.Owner != MQ_TSA)
+      && (l->RW.InPieces.Owner != MQ_TSA)
 #endif
       ) {
     int ret2;
@@ -1207,7 +1211,7 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_Unlock(MQ_RWLock_t *l)
   }
 #endif
 
-  if (l->RW.Owner == MQ_TSA) {
+  if (l->RW.InPieces.Owner == MQ_TSA) {
 #ifdef MQ_RWLOCK_DEBUGGING_SUPPORT
     return _MQ_W_Unlock(l,file,line,func);
 #else
@@ -1219,7 +1223,7 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_Unlock(MQ_RWLock_t *l)
 #else
     return _MQ_R_Unlock(l);
 #endif
-  } else if (l->MutEx.Owner == MQ_TSA) {
+  } else if (l->MutEx.InPieces.Owner == MQ_TSA) {
 #ifdef MQ_RWLOCK_DEBUGGING_SUPPORT
     return _MQ_Mutex_Unlock(l,file,line,func);
 #else
@@ -1228,5 +1232,9 @@ _MQ_RWLOCK_MAYBE_INLINE int _MQ_Unlock(MQ_RWLock_t *l)
   } else
     MQ_returnerrno_or_abort(EINVAL,l->Flags & MQ_RWLOCK_ABORTONMISUSE);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

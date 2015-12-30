@@ -12,6 +12,10 @@
 
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
 
+#ifndef __cplusplus
+typedef int bool;
+#endif
+
 #define __unusedattr __attribute__((unused))
 #define __constfunc __attribute__((const))
 #define __purefunc __attribute__((pure))
@@ -79,10 +83,10 @@
 */
 
 /* ignore -Wtraditional-conversion to work around spurious, otherwise inescapable warning on arg 4 of __atomic_compare_exchange_n ("weak_p") */
-#define MQ_SyncInt_ExchangeIfEq_Acquire(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); __typeof__(from) dummyfrom = from; __atomic_compare_exchange_n(&(i), &dummyfrom, to, 0 /* weak_p */, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED); _Pragma("GCC diagnostic pop");})
-#define MQ_SyncInt_ExchangeIfEq_Release(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); __typeof__(from) dummyfrom = from; __atomic_compare_exchange_n(&(i), &dummyfrom, to, 0 /* weak_p */, __ATOMIC_RELEASE, __ATOMIC_RELAXED); _Pragma("GCC diagnostic pop");})
-#define MQ_SyncInt_ExchangeIfEq_StoreOnFail(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); __atomic_compare_exchange_n(&(i), &(from), to, 0 /* weak */, __ATOMIC_SEQ_CST /* success_memmodel */, __ATOMIC_RELAXED /* failure_memmodel */); _Pragma("GCC diagnostic pop");})
-#define MQ_SyncInt_ExchangeIfEq_StoreOnFail_Strict(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); __atomic_compare_exchange_n(&(i), (void **)&(from), to, 0 /* weak */, __ATOMIC_SEQ_CST /* success_memmodel */, __ATOMIC_SEQ_CST /* failure_memmodel */); _Pragma("GCC diagnostic pop");})
+#define MQ_SyncInt_ExchangeIfEq_Acquire(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); __typeof__(from) dummyfrom = from; bool _cext_ret = __atomic_compare_exchange_n(&(i), &dummyfrom, to, 0 /* weak_p */, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED); _Pragma("GCC diagnostic pop"); _cext_ret;})
+#define MQ_SyncInt_ExchangeIfEq_Release(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); __typeof__(from) dummyfrom = from; bool _cext_ret = __atomic_compare_exchange_n(&(i), &dummyfrom, to, 0 /* weak_p */, __ATOMIC_RELEASE, __ATOMIC_RELAXED); _Pragma("GCC diagnostic pop"); _cext_ret;})
+#define MQ_SyncInt_ExchangeIfEq_StoreOnFail(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); bool _cext_ret = __atomic_compare_exchange_n(&(i), &(from), to, 0 /* weak */, __ATOMIC_SEQ_CST /* success_memmodel */, __ATOMIC_RELAXED /* failure_memmodel */); _Pragma("GCC diagnostic pop"); _cext_ret;})
+#define MQ_SyncInt_ExchangeIfEq_StoreOnFail_Strict(i,from,to) ({_Pragma("GCC diagnostic push"); _Pragma("GCC diagnostic ignored \"-Wtraditional-conversion\""); bool _cext_ret = __atomic_compare_exchange_n(&(i), (void **)&(from), to, 0 /* weak */, __ATOMIC_SEQ_CST /* success_memmodel */, __ATOMIC_SEQ_CST /* failure_memmodel */); _Pragma("GCC diagnostic pop"); _cext_ret;})
 
 #define MQ_SyncInt_Fence_Consume() __atomic_thread_fence(__ATOMIC_CONSUME)
 #define MQ_SyncInt_Fence_Acquire() __atomic_thread_fence(__ATOMIC_ACQUIRE)

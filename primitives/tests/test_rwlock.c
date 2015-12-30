@@ -30,6 +30,10 @@ struct MQ_Lock_Wait_Ent {
 };
 #endif
 
+typedef void (*cleanuper_t)(void *);
+typedef void *(*startuper_t)(void *);
+#define pthread_create(thr,attr,startuper,arg) pthread_create(thr,attr,(startuper_t)startuper,arg)
+
 #include <sys/signal.h>
 
 #ifndef dprintf
@@ -53,7 +57,7 @@ __thread_scoped const char *launch_function = 0;
 #define Decrement_Futex_Trips(lock,n) {}
 #endif
 
-static void *testroutine_mutex(void *arg) {
+static void *testroutine_mutex(MQ_RWLock_t *arg) {
   set_launchpoint();
   int64_t ret;
   if ((ret=MQ_Mutex_Lock(arg,1000000L))<0) {
@@ -69,7 +73,7 @@ abort();
   usleep(10);
   testtot = testtot_before_sleep + 1;
   if ((ret=MQ_Mutex_Unlock(arg))<0) {
-    MQ_dprintf3("testroutine_mutex MQ_Mutex_Unlock: %s (locker=%d)\n",strerror((int)(-ret)),MQ_TSA_To_TID(((MQ_RWLock_t *)arg)->MutEx.Owner));
+    MQ_dprintf3("testroutine_mutex MQ_Mutex_Unlock: %s (locker=%d)\n",strerror((int)(-ret)),MQ_TSA_To_TID(((MQ_RWLock_t *)arg)->MutEx.InPieces.Owner));
     MQ_SyncInt_Increment(launchcount,1000);
     goto out;
   }
@@ -80,7 +84,7 @@ abort();
   return 0;
 }
 
-static void *testroutine_w(void *arg) {
+static void *testroutine_w(MQ_RWLock_t *arg) {
   set_launchpoint();
   MQ_SyncInt_Increment(launchcount,1);
   int ret;
@@ -93,7 +97,7 @@ static void *testroutine_w(void *arg) {
   sched_yield();
   testtot = testtot_before_yield + 1;
   if ((ret=MQ_W_Unlock(arg))<0) {
-    MQ_dprintf3("MQ_W_Unlock in testroutine_w: %s\nR_Count=%u, W_Count=%u, MutEx=%d, LFList_Head=%p, Wait_List_Head=%p, n_waiters=%d\n",strerror((int)(-ret)),MQ_RWLOCK_R_COUNT((MQ_RWLock_t *)arg),MQ_RWLOCK_W_COUNT((MQ_RWLock_t *)arg),((MQ_RWLock_t *)arg)->MutEx.Count,
+    MQ_dprintf3("MQ_W_Unlock in testroutine_w: %s\nR_Count=%u, W_Count=%u, MutEx=%d, LFList_Head=%p, Wait_List_Head=%p, n_waiters=%d\n",strerror((int)(-ret)),MQ_RWLOCK_R_COUNT((MQ_RWLock_t *)arg),MQ_RWLOCK_W_COUNT((MQ_RWLock_t *)arg),((MQ_RWLock_t *)arg)->MutEx.InPieces.Count,
 	    ((MQ_RWLock_t *)arg)->LFList_Head,/*((MQ_RWLock_t *)arg)->Wait_LL_futex,*/((MQ_RWLock_t *)arg)->Wait_List_Head,
 	    MQ_RWLock_Cur_Waiter_Count_Unlocked((MQ_RWLock_t *)arg));
     return 0;
@@ -101,14 +105,14 @@ static void *testroutine_w(void *arg) {
   return 0;
 }
 
-static void *testroutine_r(void *arg) {
+static void *testroutine_r(MQ_RWLock_t *arg) {
   set_launchpoint();
   int ret;
 
   MQ_SyncInt_Increment(testtot,1);
 
   if ((ret=MQ_R_InheritLock((MQ_RWLock_t *)arg))<0)
-    MQ_dprintf3("testroutine_r MQ_R_InheritLock: %s (RW.Count=%x)\n",strerror((int)(-ret)),((MQ_RWLock_t *)arg)->RW.Count);
+    MQ_dprintf3("testroutine_r MQ_R_InheritLock: %s (RW.Count=%x)\n",strerror((int)(-ret)),((MQ_RWLock_t *)arg)->RW.InPieces.Count);
 
   if ((ret=MQ_R_Unlock(arg))<0) {
     MQ_dprintf3("MQ_R_Unlock in testroutine_r: %s\n",strerror((int)(-ret)));
@@ -117,7 +121,7 @@ static void *testroutine_r(void *arg) {
   return 0;
 }
 
-static void *testroutine_r2(void *arg) {
+static void *testroutine_r2(MQ_RWLock_t *arg) {
   set_launchpoint();
   int ret;
   MQ_SyncInt_Increment(launchcount,1);
@@ -149,7 +153,7 @@ static void testroutine_cond_cleanup(MQ_RWLock_t *l) {
     MQ_dprintf3("MQ_R_Unlock in testroutine_cond: %s\n",strerror((int)(-ret)));
 }
 
-static void *testroutine_cond(void *arg) {
+static void *testroutine_cond(MQ_RWLock_t *arg) {
   set_launchpoint();
   void *retarg;
   int ret;
@@ -157,7 +161,7 @@ static void *testroutine_cond(void *arg) {
   if ((ret=MQ_R_InheritLock((MQ_RWLock_t *)arg))<0)
     MQ_dprintf3("testroutine_cond MQ_R_InheritLock: %s\n",strerror((int)(-ret)));
 
-  pthread_cleanup_push(testroutine_cond_cleanup,arg);
+  pthread_cleanup_push((cleanuper_t)testroutine_cond_cleanup,arg);
 
   if ((ret=MQ_Cond_Wait(arg, MQ_FOREVER, &retarg, MQ_NOFLAGS)) < 0)
     MQ_dprintf3("testroutine_cond MQ_Cond_Wait: %s\n",strerror((int)(-ret)));
@@ -177,7 +181,7 @@ static void testroutine_cond_w_cleanup(MQ_RWLock_t *l) {
     MQ_dprintf3("MQ_W_Unlock in testroutine_cond_w: %s\n",strerror((int)(-ret)));
 }
 
-static void *testroutine_cond_w(void *arg) {
+static void *testroutine_cond_w(MQ_RWLock_t *arg) {
   set_launchpoint();
   void *retarg;
   int ret;
@@ -185,7 +189,7 @@ static void *testroutine_cond_w(void *arg) {
   if ((ret=MQ_W_InheritLock((MQ_RWLock_t *)arg))<0)
     MQ_dprintf3("testroutine_cond_w MQ_W_InheritLock: %s\n",strerror((int)(-ret)));
 
-  pthread_cleanup_push(testroutine_cond_w_cleanup,arg);
+  pthread_cleanup_push((cleanuper_t)testroutine_cond_w_cleanup,arg);
 
   if ((ret=MQ_Cond_Wait(arg, MQ_FOREVER, &retarg, 0UL)) < 0)
     MQ_dprintf3("testroutine_cond_w MQ_Cond_Wait: %s\n",strerror((int)(-ret)));
@@ -199,7 +203,7 @@ static void *testroutine_cond_w(void *arg) {
   return retarg;
 }
 
-static void *testroutine_signal_w(void *arg) {
+static void *testroutine_signal_w(MQ_RWLock_t *arg) {
   set_launchpoint();
   int ret;
 
@@ -223,7 +227,7 @@ static void testroutine_cond_mutex_cleanup(MQ_RWLock_t *l) {
     MQ_dprintf3("MQ_Mutex_Unlock in testroutine_cond_mutex: %s\n",strerror((int)(-ret)));
 }
 
-static void *testroutine_cond_mutex(void *arg) {
+static void *testroutine_cond_mutex(MQ_RWLock_t *arg) {
   set_launchpoint();
   void *retarg;
   int ret;
@@ -231,7 +235,7 @@ static void *testroutine_cond_mutex(void *arg) {
   if ((ret=MQ_Mutex_InheritLock((MQ_RWLock_t *)arg))<0)
     MQ_dprintf3("testroutine_cond_mutex MQ_Mutex_InheritLock: %s\n",strerror((int)(-ret)));
 
-  pthread_cleanup_push(testroutine_cond_mutex_cleanup,arg);
+  pthread_cleanup_push((cleanuper_t)testroutine_cond_mutex_cleanup,arg);
 
   if ((ret=MQ_Cond_Wait(arg, MQ_FOREVER, &retarg, 0UL)) < 0)
     MQ_dprintf3("testroutine_cond_mutex MQ_Cond_Wait: %s\n",strerror((int)(-ret)));
@@ -245,7 +249,7 @@ static void *testroutine_cond_mutex(void *arg) {
   return retarg;
 }
 
-static void *testroutine_cond_mutex_returnunlocked(void *arg) {
+static void *testroutine_cond_mutex_returnunlocked(MQ_RWLock_t *arg) {
   set_launchpoint();
   void *retarg;
   int ret;
@@ -269,7 +273,7 @@ static void testroutine_cond2or3_cleanup(MQ_RWLock_t *l) {
     MQ_dprintf3("MQ_W_Unlock in testroutine_cond2or3: %s\n",strerror((int)(-ret)));
 }
 
-static void *testroutine_cond2(void *arg) {
+static void *testroutine_cond2(MQ_RWLock_t *arg) {
   set_launchpoint();
   void *retarg;
   int ret;
@@ -277,7 +281,7 @@ static void *testroutine_cond2(void *arg) {
   if ((ret=MQ_W_InheritLock((MQ_RWLock_t *)arg))<0)
     MQ_dprintf3("MQ_W_InheritLock: %s\n",strerror((int)(-ret)));
 
-  pthread_cleanup_push(testroutine_cond2or3_cleanup,arg);
+  pthread_cleanup_push((cleanuper_t)testroutine_cond2or3_cleanup,arg);
 
   if ((ret=MQ_Cond_Wait(arg, MQ_FOREVER, &retarg, 0UL)) < 0)
     MQ_dprintf3("testroutine_cond2 MQ_Cond_Wait: %s\n",strerror((int)(-ret)));
@@ -291,7 +295,7 @@ static void *testroutine_cond2(void *arg) {
   return retarg;
 }
 
-static void *testroutine_cond3(void *arg) {
+static void *testroutine_cond3(MQ_RWLock_t *arg) {
   set_launchpoint();
   void *retarg;
   int ret;
@@ -301,7 +305,7 @@ static void *testroutine_cond3(void *arg) {
     return 0;
   }
 
-  pthread_cleanup_push(testroutine_cond2or3_cleanup,arg);
+  pthread_cleanup_push((cleanuper_t)testroutine_cond2or3_cleanup,arg);
 
   if ((ret=MQ_Cond_Wait(arg, MQ_FOREVER, &retarg, 0UL)) < 0)
     MQ_dprintf3("testroutine_cond3 MQ_Cond_Wait: %s\n",strerror((int)(-ret)));
@@ -344,7 +348,11 @@ int main(int argc, char **argv) {
   if ((ret=pthread_attr_setdetachstate(&attr2, PTHREAD_CREATE_JOINABLE))!=0)
     MQ_dprintf("pthread_attr_setdetachstate: %s\n",strerror((int)ret));
 
+#ifdef __cplusplus
+  MQ_RWLock_t testlock MQ_RWLOCK_INITIALIZER(); // MQ_RWLOCK_DEFAULTFLAGS is the constructor's default flags value
+#else
   MQ_RWLock_t testlock = MQ_RWLOCK_INITIALIZER(MQ_RWLOCK_DEFAULTFLAGS);
+#endif
 #if 0
   if ((ret=MQ_RWLock_Init(&testlock,MQ_RWLOCK_DEFAULTFLAGS)) < 0) {
     MQ_dprintf3("MQ_RWLock_Init: %s\n",strerror((int)(-ret)));
@@ -971,16 +979,16 @@ int main(int argc, char **argv) {
     goto out;
   }
 
-  if (((MQ_SyncInt_Get(testlock.MutEx.Count) != 0) && (testlock.MutEx.EnBloc != MQ_MUTEX_CORE_INITIALIZER)) ||
-      (((MQ_SyncInt_Get(testlock.RW.Count) & ~MQ_RWLOCK_COUNT_CONTENDED) != 0) && (testlock.RW.EnBloc != MQ_RWLOCK_CORE_INITIALIZER)) ||
-      (MQ_TSA_ValidP(MQ_SyncInt_Get(testlock.MutEx.Owner)) && (testlock.MutEx.Owner != MQ_TSA_INVALIDOWNER)) ||
+  if (((MQ_SyncInt_Get(testlock.MutEx.InPieces.Count) != 0) && (testlock.MutEx.EnBloc != MQ_MUTEX_CORE_INITIALIZER)) ||
+      (((MQ_SyncInt_Get(testlock.RW.InPieces.Count) & ~MQ_RWLOCK_COUNT_CONTENDED) != 0) && (testlock.RW.EnBloc != MQ_RWLOCK_CORE_INITIALIZER)) ||
+      (MQ_TSA_ValidP(MQ_SyncInt_Get(testlock.MutEx.InPieces.Owner)) && (testlock.MutEx.InPieces.Owner != MQ_TSA_INVALIDOWNER)) ||
       (MQ_SyncInt_Get(testlock.Wait_List_Head) != 0)
-      || ((MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock) != 0) && (testlock.MutEx.Owner != MQ_TSA_INVALIDOWNER))
+      || ((MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock) != 0) && (testlock.MutEx.InPieces.Owner != MQ_TSA_INVALIDOWNER))
 #ifndef MQ_RWLOCK_NOLOCKTRACKING_SUPPORT
       || ((__MQ_RWLock_ThreadState.HeldLocks_Index != 0) && __MQ_ThreadState_Pointer)
 #endif
       || (testlock.Shared_Futex_RefCount != 0)
-      || (MQ_TSA_ValidP(testlock.RW.Owner) && (testlock.RW.Owner != MQ_TSA_INVALIDOWNER))) {
+      || (MQ_TSA_ValidP(testlock.RW.InPieces.Owner) && (testlock.RW.InPieces.Owner != MQ_TSA_INVALIDOWNER))) {
     dprintf(STDERR_FILENO,"\nat restart, __MQ_RWLock_ThreadState.HeldLocks_Index=%d, Shared_Futex_Refcount=%d, Cur_Waiter_Count=%d, R_Count=%u, W_Count=%u, Contended_bit=%d, MutEx=%u, MutEx_Locker=%d, RW.Owner=%d, LFList_Head=%p, Wait_List_Head=%p"
 #if defined(MQ_RWLOCK_DEBUGGING_SUPPORT) || defined(MQ_RWLOCK_STATISTICS_SUPPORT)
 ", nonintrinsic_futex_trips=%lu/%lu, M=%lu/%lu/%lu/%lu, R=%lu/%lu/%lu, W=%lu/%lu/%lu, R2W=%lu/%lu/%lu, C=%lu/%lu, S=%lu/%lu/%lu\n\tinit=%s@%d/%s();lastWL=[%d]%s@%d/%s();lastWU=[%d]%s@%d/%s();lastFRL=[%d]%s@%d/%s();lastRL=[%d]%s@%d/%s();lastRU=[%d]%s@%d/%s()\n"
@@ -994,7 +1002,7 @@ int main(int argc, char **argv) {
 	    -1,
 #endif
 	    testlock.Shared_Futex_RefCount,
-	    MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock),MQ_RWLOCK_R_COUNT(&testlock),MQ_RWLOCK_W_COUNT(&testlock),(MQ_RWLOCK_RW_RAWCOUNT(&testlock)&MQ_RWLOCK_COUNT_CONTENDED) != 0, testlock.MutEx.Count, MQ_TSA_To_TID(testlock.MutEx.Owner), MQ_TSA_To_TID(testlock.RW.Owner),
+	    MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock),MQ_RWLOCK_R_COUNT(&testlock),MQ_RWLOCK_W_COUNT(&testlock),(MQ_RWLOCK_RW_RAWCOUNT(&testlock)&MQ_RWLOCK_COUNT_CONTENDED) != 0, testlock.MutEx.InPieces.Count, MQ_TSA_To_TID(testlock.MutEx.InPieces.Owner), MQ_TSA_To_TID(testlock.RW.InPieces.Owner),
 	    testlock.LFList_Head,testlock.Wait_List_Head
 
 #if defined(MQ_RWLOCK_DEBUGGING_SUPPORT) || defined(MQ_RWLOCK_STATISTICS_SUPPORT)
@@ -1098,7 +1106,7 @@ int main(int argc, char **argv) {
   }
 
 #ifdef MQ_DEBUG_MORE
-  dprintf(STDERR_FILENO,"after mutex contention test, MutEx=%u, LFList_Head=%p, LFList_Tail=%p, LFList_Head_Waiter=%d, n_waiters=%d, nonintrinsic_futex_trips=%lu/%lu, M=%lu/%lu/%lu\n",MQ_SyncInt_Get(testlock.MutEx.Count),
+  dprintf(STDERR_FILENO,"after mutex contention test, MutEx=%u, LFList_Head=%p, LFList_Tail=%p, LFList_Head_Waiter=%d, n_waiters=%d, nonintrinsic_futex_trips=%lu/%lu, M=%lu/%lu/%lu\n",MQ_SyncInt_Get(testlock.MutEx.InPieces.Count),
 	  testlock.LFList_Head,testlock.LFList_Tail,testlock.LFList_Head_Waiter,
 	  MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock), testlock.futex_trips,
 	  futex_trips_possible,
@@ -2091,12 +2099,12 @@ int main(int argc, char **argv) {
   futex_trips_possible += ((uint64_t)i-1); /* includes unlocks in first half */
 
   nspins = 0;
-  while ((testtot<i) || testlock.Wait_List_Head || ((testlock.RW.Count & ~MQ_RWLOCK_COUNT_CONTENDED) != 0)
+  while ((testtot<i) || testlock.Wait_List_Head || ((testlock.RW.InPieces.Count & ~MQ_RWLOCK_COUNT_CONTENDED) != 0)
 	 || (MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock) > 0)
 	 ) { 
     ++nspins;
     if (nspins > 1000) {
-      MQ_dprintf("testtot never made it to %d -- testtot=%d, WLH=%p, RW.Count=%x, R_bit=%d, Contended_bit=%d, CWC=%d\n",i,testtot,testlock.Wait_List_Head,MQ_RWLOCK_RW_COUNT(&testlock),(testlock.RW.Count&MQ_RWLOCK_COUNT_READ) ? 1 : 0,(testlock.RW.Count&MQ_RWLOCK_COUNT_CONTENDED) ? 1 : 0, MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock));
+      MQ_dprintf("testtot never made it to %d -- testtot=%d, WLH=%p, RW.Count=%x, R_bit=%d, Contended_bit=%d, CWC=%d\n",i,testtot,testlock.Wait_List_Head,MQ_RWLOCK_RW_COUNT(&testlock),(testlock.RW.InPieces.Count&MQ_RWLOCK_COUNT_READ) ? 1 : 0,(testlock.RW.InPieces.Count&MQ_RWLOCK_COUNT_CONTENDED) ? 1 : 0, MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock));
       goto out;
     }
     if (nspins<10)
@@ -2122,7 +2130,7 @@ int main(int argc, char **argv) {
     goto out;
   }
 
-  if (MQ_RWLock_Cur_Waiter_Count(&testlock,0) != 0) {
+  if (MQ_RWLock_Cur_Waiter_Count(&testlock,(MQ_Wait_Type)0) != 0) {
     MQ_dprintf("\nn_waiters spuriously nonzero\n");
     goto out;
   }
@@ -2173,7 +2181,7 @@ __MQ_RWLock_ThreadState.HeldLocks_Index
 #else
 -1
 #endif
-, MQ_TSA_To_TID(testlock.RW.Owner),(testlock.RW.Count&MQ_RWLOCK_COUNT_CONTENDED)!=0, testlock.MutEx.Count,MQ_TSA_To_TID(testlock.MutEx.Owner),testlock.MutEx_Spin_Estimator,
+, MQ_TSA_To_TID(testlock.RW.InPieces.Owner),(testlock.RW.InPieces.Count&MQ_RWLOCK_COUNT_CONTENDED)!=0, testlock.MutEx.InPieces.Count,MQ_TSA_To_TID(testlock.MutEx.InPieces.Owner),testlock.MutEx_Spin_Estimator,
 	    testlock.LFList_Head,/*testlock.Wait_LL_futex,*/testlock.Wait_List_Head, 
 	  MQ_RWLock_Cur_Waiter_Count_Unlocked(&testlock)
 #if defined(MQ_RWLOCK_STATISTICS_SUPPORT) || defined(MQ_RWLOCK_DEBUGGING_SUPPORT)
