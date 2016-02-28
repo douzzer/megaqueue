@@ -20,7 +20,7 @@ extern __thread_scoped pid_t __my_tid;
 #define gettid() ((__my_tid==-1) ? _gettid() : __my_tid)
 #endif
 
-#define MQ_abort() (abort(),0)
+#define MQ_abort() abort()
 
 union __MQ_SchedState {
   uint64_t EnBloc;
